@@ -38,7 +38,15 @@ with db.engine.begin() as cn:
         cn.execute(db.email_ok.insert().values(user_id=uid, verified_at=time.time()))
 st = a.get("/api/status").json()
 part_mb = st["upload_part_mb"]
-data = os.urandom(int(part_mb * 1024 * 1024 * 2.4))            # two full pieces and a shorter last one
+# a real (tiny) video, padded to two full pieces and a shorter last one: uploads are now checked to be real videos
+import subprocess                              # noqa: E402
+import tempfile                                # noqa: E402
+_tmp = Path(tempfile.mkdtemp()) / "v.mp4"
+subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30", "-f", "lavfi", "-i",
+                "sine=frequency=440", "-t", "6", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-movflags", "+faststart", str(_tmp)], check=True)
+data = _tmp.read_bytes()
+data += b"\0" * (int(part_mb * 1024 * 1024 * 2.4) - len(data))
 H = {"Content-Type": "application/octet-stream"}
 
 s = a.post("/api/upload/start", json={"name": "big video.mp4", "size": len(data), "options": {"max_clips": 2}, "creator": ""}).json()

@@ -1,188 +1,203 @@
-# PeakCut
+# Echo Clip
 
-Turn long videos and live streams into captioned vertical clips, ready to post. Free and open source: run it on
-your own computer or server, with your own AI key.
+**AI-powered gaming streamer clipping studio.** Echo Clip turns a long gaming stream or VOD into captioned
+vertical Shorts (1080 × 1920), on your own Mac. It finds the moments worth watching, ranks them, trims slow
+openings, lays the streamer's facecam and the gameplay out for a vertical screen, and burns in word-by-word
+captions. You review, edit and download; nothing is ever published for you.
 
-Paste a YouTube, Twitch or Kick link (or upload a file) and PeakCut finds the moments worth clipping, cuts them to
-9:16, adds word-by-word captions and a hook, and can post them to your connected accounts. It can also record a
-creator's live stream and clip the highlights while the stream is still running.
+Echo Clip is built on the open-source [PeakCut](https://github.com/haziqahmedqasmi/PeakCut) project (MIT). See
+[LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-## What it does
+## The daily workflow
 
-- **Clips from any video.** Transcribes the audio, asks an AI which moments would hold a stranger's attention, and
-  renders each one with captions in one of three styles.
-- **Live clipping.** Records a stream into a rolling buffer and clips as it happens, using loudness, chat activity
-  and the transcript.
-- **Workspaces per creator.** Channels, clip settings, posting rules and an activity log for each creator you clip.
-- **Posting.** Connect YouTube, Instagram and TikTok in one click, then queue or auto-post finished clips, with
-  spacing and daily caps (see [DEPLOY.md](DEPLOY.md#connecting-youtube-instagram-and-tiktok) for the one-time setup).
-- **No sign-in on your own computer.** It opens straight into the dashboard. On a shared server, switch accounts on
-  (`PEAKCUT_ACCOUNTS=1`) for email or Google sign-in and an admin dashboard.
-- **Your own AI.** Gemini, OpenAI, Grok, Groq, OpenRouter, Claude, a local model through Ollama, or anything that
-  speaks the OpenAI chat format. No key at all also works: clips are then picked by loudness.
+Open Echo Clip → paste the link of a stream you are allowed to clip (or upload the recording) → choose how many
+clips (5–10) and how long (30–45 s by default) and a caption style → **Generate** → watch the clips, fix any
+timestamps or styles → **Download** one, a selection, or all of them.
 
-## Quick start
+## Two ways in: a link, or a video from your Mac
 
-You need Python 3.10 or newer and `ffmpeg`. On Windows: `winget install Gyan.FFmpeg`. On a Mac: `brew install ffmpeg`.
-On Linux: `sudo apt install ffmpeg`. PeakCut finds it by itself and tells you in the dashboard if it is missing.
+The home page has both, one above the other: **paste a link** (YouTube, Twitch, Kick) or **upload a video**
+(drag it onto the box, or press **Choose video file**). Both go through exactly the same pipeline with the same
+settings (number of clips, length, caption style, captions on/off, layout and the rest).
 
-```bash
-git clone <this repository> peakcut
-```
+- **Formats:** MP4, MOV, MKV, WebM, AVI, M4V. The name is only a first filter: Echo Clip looks inside every
+  uploaded file with FFprobe (it needs a video stream that really decodes, a sound track and a readable length;
+  up to 4K) and refuses anything else with the reason: damaged or incomplete, sound only, no sound, not a video.
+- **Before uploading** the page shows the file's name, size and (where the browser can preview the format) its
+  resolution and length; MKV and AVI details are shown once Echo Clip has checked the file. **Change** swaps the
+  file, **×** removes it.
+- **Size and space:** no size limit by default (`PEAKCUT_MAX_UPLOAD_MB` sets one). The upload is refused up front
+  if the drive does not have the file's size plus 3 GB free. The home page shows how much room there is.
+- **Big files** are sent in 40 MB pieces (never loaded whole into the browser), two at a time, with progress in
+  megabytes. A piece that fails is retried; if the connection drops, the row offers **Resume upload**, which sends
+  only the missing pieces (an unfinished upload is kept for 6 hours).
+- **Where it goes:** `data/users/u_local/jobs/<project>/source.<ext>`, unchanged, kept even if a later AI or
+  rendering step fails. Nothing is uploaded anywhere else: video and audio stay on the Mac.
+- **When a link can't be downloaded** (for example YouTube refusing this computer), the link stays on screen with
+  "Unable to download this video. You can upload an authorized local copy instead." and an **Upload a local copy**
+  button. Echo Clip does not keep retrying and does not try to get around the refusal.
 
-```bash
-cd peakcut
-```
+## English, Hindi and Hinglish
 
-```bash
-pip install -r requirements.txt
-```
+Echo Clip listens to which language is spoken (no setting needed; you can override it under More options) and
+writes it down on your Mac:
 
-Start the server:
-
-```bash
-python -m studio.server
-```
-
-The first start downloads the speech model by itself (about 480 MB, once).
-
-Open http://127.0.0.1:8765. There is no sign-in: it opens straight into the dashboard. Go to **Settings, AI**, choose
-your AI service, paste your key and press **Save and test** (see [Choose your AI](#choose-your-ai)).
-
-## Choose your AI
-
-PeakCut needs a chat model that can return JSON. The easy way is in the dashboard: **Settings, AI**. Pick the
-service, paste your key, press **Find models** to choose from the service's own list, then **Save and test**. The
-key is kept in the data folder on your machine and is never shown again.
-
-If you prefer a file (or run a server), the same three things can go in `.env`. What is saved in the dashboard wins:
-
-```ini
-PEAKCUT_AI_PROVIDER=gemini
-PEAKCUT_AI_MODELS=gemini-2.5-flash
-PEAKCUT_AI_KEY=your-key-here
-```
-
-| `PEAKCUT_AI_PROVIDER` | Service | Where to get a key |
+| Spoken | How it is written down | Engine |
 |---|---|---|
-| `gemini` | Google Gemini | https://aistudio.google.com/apikey |
-| `openai` | OpenAI | https://platform.openai.com/api-keys |
-| `xai` | Grok (xAI) | https://console.x.ai |
-| `groq` | Groq | https://console.groq.com/keys |
-| `openrouter` | OpenRouter (many models, one key) | https://openrouter.ai/keys |
-| `anthropic` | Claude | https://console.anthropic.com |
-| `ollama` | A model on your own machine, no key | https://ollama.com |
-| `custom` | Any OpenAI-compatible address: also set `PEAKCUT_AI_BASE_URL` | |
+| English | English | Parakeet (fast, exact word timings) |
+| Hindi | Devanagari, as spoken | Whisper large-v3-turbo (about 1.6 GB, downloaded once) |
+| Hinglish | Hindi words in Devanagari, English words in Latin letters, as the creator mixed them | Whisper |
+| Other languages | in their own language | Whisper |
 
-- `PEAKCUT_AI_MODELS` is the model id exactly as the service names it. Model names change often, so check the
-  service's current list. Several ids separated by commas are tried in order, which gives you a fallback.
-- A fast, inexpensive model is the right choice. A one-hour video is read in about four requests.
-- You pay the AI service directly for what you use. The **AI usage** page in the app shows how many requests and
-  tokens each video took.
-- Speech to text does not use the AI service. It runs on your own machine, so audio never leaves it.
+The transcript is never rewritten or translated: it is kept as spoken, with word timings and Whisper's confidence
+per word. The AI ranks Hindi and Hinglish moments **in the language they are spoken in** (jokes, sarcasm, roasts,
+punchlines), from compact text excerpts only, in the same single request as before.
 
-## Settings
+**Captions** are a separate choice from the spoken language: **Original** (as spoken), **Hindi**, **English**,
+**Hindi + English** (bilingual: the spoken line word by word with its translation under or over it; choose Hindi or
+English on top), or **Hindi in Roman letters**. Translations are made by your AI service in one request per video,
+kept in the project (`translations.json`), and shown as whole phrases timed to the speech they translate (translated
+words never get made-up timings). The clip editor shows each spoken line next to its translation to compare.
 
-Everything is set through environment variables, normally in a `.env` file next to this README.
-[`.env.example`](.env.example) lists every setting with a short explanation. The ones that matter first:
+Hindi text needs the FriBiDi library for correct letter shaping (क्या, क्षत्रिय): `brew install fribidi`. Echo Clip
+turns shaping on by itself at start and refuses to draw Hindi without it rather than drawing it wrong.
 
-| Setting | What it is for |
+## Headlines and music
+
+**Headlines:** the AI writes each clip's headline in English, Hindi and Hinglish in the ranking request (4–10 words,
+true to what happens, at most one emoji). Choose the language independently of captions (or "same as the video"),
+edit it by hand, pick a look (white box, bold outline, neon purple, yellow box), an animation (pop, fade, scale,
+none), how long it stays (3 s by default; 0 = the whole clip) and where (auto keeps clear of faces and captions).
+Changing any of this never asks the AI again.
+
+**Music:** Settings → Music holds the library: five tracks Echo Clip composes itself (original, free to use) plus
+any you add (MP3, WAV, M4A, AAC, FLAC, OGG; only music you made, licensed, or that is free to use; you confirm it).
+"Auto" picks a track for each clip from its kind of moment (funny → playful, chase → energetic, surprise →
+suspense…). The mix keeps the original sound at full level, puts the music at 12% by default, lowers it by about
+11 dB while someone talks (ducking) and brings it back in the pauses, fades it in and out, and never clips. You can
+listen to the mix before rendering.
+
+## What happens to a video
+
+| Step | Where it runs |
 |---|---|
-| `PEAKCUT_AI_PROVIDER`, `PEAKCUT_AI_MODELS`, `PEAKCUT_AI_KEY` | The AI that picks clips and writes titles (or set it in the dashboard) |
-| `PEAKCUT_ACCOUNTS` | `1` makes everyone sign in. Use it on any server other people can reach |
-| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Optional: Sign in with Google, and connecting YouTube |
-| `PEAKCUT_SMTP_*`, `PEAKCUT_MAIL_FROM` | Optional: confirmation and password emails |
-| `PEAKCUT_DATA` | Where videos, clips and the database are kept (default `./data`) |
+| Import a YouTube/Twitch/Kick link (yt-dlp) or an uploaded MP4/MOV/MKV/WebM/AVI/M4V | This Mac |
+| Speech to text with word timings (Parakeet through sherpa-onnx) | This Mac |
+| 20–40 candidate moments from the transcript, loudness, reaction words and laughter | This Mac |
+| Ranking: **one** request per video with a compact text list of the candidates, scored on entertainment 25%, reaction 20%, surprise 20%, hook 15%, context 10%, replay 10%, with the opening judged in the same request | Your AI service (text only), or this Mac when the AI is off |
+| Hook check of each picked clip's first seconds (dead air, fillers, a quiet start), with a safer later start suggested | This Mac |
+| Facecam search (YuNet face detection across the whole video) and the vertical layout | This Mac |
+| Rendering with FFmpeg: H.264 + AAC, 30 fps, captions drawn with Pillow (no libass needed) | This Mac |
 
-`.env`, the `secrets/` folder and all user data are ignored by git. Keep keys there, never in the code.
+Video, audio and frames never leave the machine. Only the candidates' words go to the AI service you choose.
 
-## Admins
+## Quick start (macOS)
 
-This only matters with accounts switched on (`PEAKCUT_ACCOUNTS=1`); without them you are the owner and can do
-everything. An account is an admin only when the database says so. No email address is special in the code and no web request
-can change a role. Do it on the machine that runs PeakCut:
+You need Python 3.10+ and FFmpeg (`brew install ffmpeg`).
 
 ```bash
-python -m studio.admin grant you@example.com
+cd "Echo Clip"
 ```
-
-`revoke` and `list` work the same way. The admin dashboard is at `/admin` and answers "not found" to everyone else.
-
-## How it is built
-
-| Part | What it is |
-|---|---|
-| `studio/` | The server: FastAPI, the clip pipeline, live recording, accounts |
-| `studio/ai.py` | The only file that talks to an AI service. Add a provider here |
-| `web/` | The pages: landing, sign-in, the app, the admin dashboard (plain HTML, CSS and JavaScript, no build step) |
-| `tests/` | Tests that run against a throwaway copy of the app |
-| `deploy/`, `Dockerfile`, `docker-compose.yml` | One-server deployment with PostgreSQL and automatic HTTPS |
-
-Video work is done with `ffmpeg` and `yt-dlp`. Speech is transcribed with `sherpa-onnx` and the Parakeet model.
-Data is kept per user: accounts in the database (SQLite on your own computer, PostgreSQL on a server), videos and
-clips in each user's own folder. [AGENTS.md](AGENTS.md) is a short map of the code for contributors and AI coding
-assistants.
-
-## Where your videos and clips are kept
-
-Everything PeakCut keeps is in one folder: videos, clips, recordings, creators, settings and the speech model. By
-default it is the `data` folder inside PeakCut. **Settings, Storage** shows the folder and how much room its drive
-has, opens it in one click, and lets you move it to another drive: choose the new folder, and PeakCut moves
-everything there the next time it starts. If the drive is nearly full, PeakCut says so and stops taking new videos
-until there is room. (`PEAKCUT_DATA` in `.env` still works and takes priority.)
-
-## Updating
-
-PeakCut checks GitHub once a minute while it runs. When a newer version is out, the dashboard shows a notice
-within a minute or two (no restart needed), with what changed
-and how to update: ask your AI coding assistant to do it (the notice has a sentence to paste), or run
-`git pull && pip install -r requirements.txt` in the PeakCut folder and restart it (with Docker:
-`git pull && docker compose up -d --build`). Your `.env`, keys and clips are not touched. Only the two commit ids
-are sent to GitHub; set `PEAKCUT_UPDATE_CHECK=0` to turn the check off.
-
-## Deploy
-
-[DEPLOY.md](DEPLOY.md) walks through a single server with Docker: the app, PostgreSQL, and Caddy for HTTPS.
 
 ```bash
-docker compose up -d --build
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
-## How it behaves under load
+```bash
+.venv/bin/python -m studio.server
+```
 
-- The page asks the server one small question every few seconds. When nothing has changed, the answer comes
-  straight from memory.
-- Each person's videos wait in their own line and the lines take turns, so one person cannot hold everyone up.
-- The server measures its own processor, memory and disk every second. Extra videos and recordings start only
-  while there is room, wait briefly when it is nearly full, and continue the moment it frees up.
-- There are no limits on upload size, video length, recordings, creators or storage unless you set them in
-  `.env`. Five videos can be sent at once. Request sizes are always capped, so junk can't fill the memory.
+Open http://127.0.0.1:8765. The first start downloads the speech model by itself (about 480 MB, once).
+
+## Choose your AI (Featherless by default)
+
+Go to **Settings → AI**:
+
+1. Service: **Featherless AI** (OpenAI-compatible, `https://api.featherless.ai/v1`).
+2. Paste your API key. It is stored in the **macOS Keychain** (on other systems: `data/ai.json`, readable by you
+   only). It is never sent back to the page, logged, or committed.
+3. Model: recommended `Qwen/Qwen3-Next-80B-A3B-Instruct` (Featherless model class `qwen3next-80b`; 32k context).
+   **Find models** lists the catalogue with prices; **Check model** looks one up for free.
+4. **Save and test**. The test first looks the model up in the catalogue (free), then makes one tiny request, and
+   says plainly whether the key, the credit, the rate limit, the model or the network is the problem.
+
+Credit protection: one ranking request per video, cached on disk by content hash (re-renders, caption or layout
+changes and restarts never call the AI again), an answer-length cap, limited retries (never on "no credit"), a
+"Local only" switch, a monthly budget computed from real token counts and the prices you enter, and an optional
+second ("fallback") service that is used only if you tick **Allow paid fallback**. With no AI, or when the credit
+runs out, clips are ranked on this Mac and the app says so.
+
+Other services still work: Gemini, OpenAI, Grok, Groq, OpenRouter, Claude API, Ollama, or any OpenAI-compatible
+address. (A Claude Pro subscription is not API credit: the Claude option needs an Anthropic API key.)
+
+## Layouts for 16:9 streams
+
+| Layout | What it does |
+|---|---|
+| Smart auto (default) | Picks per clip: facecam + gameplay stacked when a facecam is found, a tall crop around a big on-camera face, gameplay focus when nobody is found |
+| Facecam + gameplay | The facecam on top, the gameplay (cropped around the action, away from the facecam) below |
+| Gameplay focus | A large 4:5 gameplay crop that follows where things move, over a blurred fill |
+| Facecam focus | The reaction big, the game below (or a 9:16 crop around a full-frame camera) |
+| Full frame / Zoomed / Centre crop | The original simple layouts |
+| Manual | You choose the facecam area, the gameplay area, the split and the zoom |
+
+Nothing is ever stretched, and there are no black bars (a blurred fill is used where the panels do not cover the
+frame).
+
+## Caption styles
+
+Gaming Bold, Neon Purple, Classic White, Viral Highlight and Minimal Clean (plus the original Bounce, Hype and
+Clean), each adjustable: font, weight, size, colour, highlight colour, outline, shadow/glow, box, position, words
+at a time, pop animation, hook title on/off. The preview is drawn by the same code that renders the clips, on a
+real frame of the clip.
+
+## Where things are kept
+
+Everything is in `data/` (or the folder chosen in **Settings → Storage**):
+
+```
+data/users/u_local/jobs/<project id>/
+    source.mp4         the imported video (never changed)
+    words.json         the transcript, word by word
+    loudness.json      loudness per second
+    job.json           settings, candidates, scores, hook checks, clip list
+    clips/clipNN.mp4   the finished clips, with clipNN.jpg covers
+data/ai_cache/         saved AI rankings
+data/models/           the speech model
+```
+
+Projects survive restarts; an interrupted import picks up where it stopped. **Settings → Storage** shows each
+project's size, can remove a source video while keeping its clips, delete a project, and clean up leftovers.
 
 ## Tests
 
 ```bash
-python tests/run.py
+.venv/bin/python tests/run.py
 ```
 
-This starts a copy of the app on a spare port with an empty temporary data folder, runs the permission, abuse and
-queue tests against it, then removes it. It needs no keys and never touches real data.
+Starts throwaway copies of the app with empty temporary data folders and runs every suite, including an end-to-end
+test that uploads a synthetic landscape video with real speech, transcribes it, ranks and renders clips, and checks
+the MP4s (size, codecs, length, audio sync, captions), re-rendering, downloads and a restart, and an upload test
+(every format, broken files, resumed uploads, disk space, and a link and an upload of the same video giving the
+same clips). No keys are needed and
+no AI credit is spent.
 
 ## Security
 
-- With sign-in off, PeakCut listens on this computer only (`127.0.0.1`), refuses changes sent by other websites,
-  and only answers to its own address. Do not expose it to the internet that way: turn accounts on.
-- Passwords are stored only as salted scrypt hashes. Sessions are random tokens stored hashed; cookies are HTTP-only.
-- Every route works out who is asking from the session, never from the request, so users only reach their own data.
-- Only known video sites are fetched, and text from videos is treated as data when it is shown to the AI.
-- Found a problem? Please report it privately through the repository's security advisories instead of opening a
-  public issue.
+- Listens on `127.0.0.1` only by default; refuses changes sent by other websites.
+- Keys are kept server-side (Keychain on macOS), never returned to the browser.
+- Text from videos is treated as data in prompts, never as instructions.
+- Only known video sites are fetched. Echo Clip does not bypass DRM, sign-ins, paywalls or any access restriction.
 
 ## Using it responsibly
 
-Clip videos you made, or have permission to use. You are responsible for the rights to what you download, clip and
-post, and for following the terms of the sites you fetch from and post to.
+Clip videos you made or have permission to use. A public video is not automatically licensed for reuse. You are
+responsible for the rights to what you download, clip and post, and for following the terms of the sites you use.
+
+The **Classic studio** (`/classic`) keeps PeakCut's creator workspaces, live recording and posting features.
 
 ## Licence
 
-[MIT](LICENSE). Caption fonts in `studio/fonts/` (Anton, Archivo Black, Poppins) are under the SIL Open Font
-License; the licence texts are in the same folder.
+[MIT](LICENSE). Fonts and the face-detection model keep their own licences: see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Echo Clip is not affiliated with Rockstar Games, YouTube,
+OpusClip, Featherless AI or any streamer.

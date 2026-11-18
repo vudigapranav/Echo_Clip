@@ -2,7 +2,7 @@
 
     python tests/run.py
 
-Starts PeakCut on a spare port with an empty, temporary data folder, runs the tests against it, then stops it and
+Starts Echo Clip on a spare port with an empty, temporary data folder, runs the tests against it, then stops it and
 deletes the folder. Your real data and your running server are never touched. No AI key is needed: the tests cover accounts, permissions, limits and the queue, not clip quality."""
 import os
 import shutil
@@ -20,14 +20,17 @@ BASE = f"http://127.0.0.1:{PORT}"
 
 def main() -> int:
     data = Path(tempfile.mkdtemp(prefix="peakcut-test-"))
-    env = {**os.environ, "PEAKCUT_DATA": str(data), "PEAKCUT_PORT": str(PORT), "PEAKCUT_PUBLIC_URL": BASE,
+    sys.path.insert(0, str(ROOT))
+    from studio import shaping                          # Hindi captions need text shaping in the tests too
+    env = {**shaping.env_for_children(), "PEAKCUT_DATA": str(data), "PEAKCUT_PORT": str(PORT), "PEAKCUT_PUBLIC_URL": BASE,
            "PEAKCUT_HOST": "127.0.0.1", "PEAKCUT_AUTO_RELOAD": "0", "DATABASE_URL": "",
            "PEAKCUT_ACCOUNTS": "1", "PEAKCUT_FETCH_MODEL": "0", "PEAKCUT_UPDATE_CHECK": "0",                   # these tests are about people signing in; tests/test_local.py covers the default
            # nothing outside this machine is contacted: no AI, no email, no Google sign-in
            "PEAKCUT_SMTP_HOST": "", "PEAKCUT_VERIFY_EMAIL": "1",   # the tests cover the confirm-your-email rule
            "GOOGLE_CLIENT_ID": "", "GOOGLE_CLIENT_SECRET": "", "GOOGLE_CLIENT_FILE": "", "PYTHONUNBUFFERED": "1",
            "PEAKCUT_AI_KEY": "", "PEAKCUT_AI_KEY_FILE": "", "PEAKCUT_AI_MODELS": "",
-           "PEAKCUT_UPLOAD_PART_MB": "5", "PEAKCUT_MAX_UPLOAD_MB": "64"}
+           "PEAKCUT_UPLOAD_PART_MB": "5", "PEAKCUT_MAX_UPLOAD_MB": "64",
+           "PEAKCUT_KEYCHAIN": "0", "PEAKCUT_UPDATE_REPO": ""}   # tests never touch the real Keychain
     log = data / "server.log"
     failed = []
     with log.open("w", encoding="utf-8") as out:
@@ -58,7 +61,11 @@ def main() -> int:
                 ("no limits by default", ["tests/test_limits.py"]),
                 ("captions never overlap, stuck clips, sentence endings", ["tests/test_stuck.py"]),
                 ("fresh installs: ffmpeg, the speech model, AI errors", ["tests/test_tools.py"]),
-                ("the storage folder: full drive, open, move", ["tests/test_storage.py"])]
+                ("the storage folder: full drive, open, move", ["tests/test_storage.py"]),
+                ("Echo Clip pipeline: captions, layouts, facecam, moments, ranking, hooks, Featherless", ["tests/test_pipeline.py"]),
+                ("Echo Clip end to end: upload, transcribe, rank, render, re-render, download, restart", ["tests/test_e2e.py"]),
+                ("uploading a video: formats, bad files, resume, disk space, same pipeline as links", ["tests/test_uploads.py"]),
+                ("English, Hindi and Hinglish: detection, transcription, caption languages, headlines, music", ["tests/test_multilingual.py"])]
         for name, args in runs:
             print(f"\n=== {name} ===", flush=True)
             r = subprocess.run([sys.executable, *args], cwd=ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")

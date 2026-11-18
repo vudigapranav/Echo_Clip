@@ -2,6 +2,7 @@
 translated. The AI is replaced by a stand-in, so nothing leaves this machine."""
 import os, sys, tempfile
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-roman-"); os.environ["DATABASE_URL"] = ""
+os.environ["PEAKCUT_KEYCHAIN"] = "0"     # tests never touch the real Keychain
 sys.path.insert(0, ".")
 from studio import brain, roman
 fails = []

@@ -6,6 +6,7 @@ import sys
 import tempfile
 
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-local-")
+os.environ["PEAKCUT_KEYCHAIN"] = "0"     # tests never touch the real Keychain
 os.environ.update(DATABASE_URL="", PEAKCUT_ACCOUNTS="0", PEAKCUT_AI_PROVIDER="gemini", PEAKCUT_AI_MODELS="", PEAKCUT_AI_KEY="",
                   PEAKCUT_AI_KEY_FILE="", PEAKCUT_AI_BASE_URL="", PEAKCUT_PUBLIC_URL="http://127.0.0.1:8765")
 sys.path.insert(0, ".")
@@ -54,7 +55,7 @@ for host in ("localhost:8765", "192.168.1.20:8765", "[::1]:8765", "127.0.0.1"):
 KEY = "test-key-abcdefgh12345678"
 a = c.get("/api/ai").json()
 check("no AI to begin with", (a["ready"], a["has_key"], st["ai"]["ready"]), (False, False, False))
-check("the services are listed", [p["id"] for p in a["providers"]][:3], ["gemini", "openai", "xai"])
+check("the services are listed", [p["id"] for p in a["providers"]][:3], ["featherless", "gemini", "openai"])
 put = lambda body: c.put("/api/ai", json=body, headers=ORIGIN)  # noqa: E731
 check("a service needs its key", put({"provider": "gemini", "models": "model-a"}).status_code, 400)
 check("...and a model", put({"provider": "gemini", "models": "", "key": KEY}).status_code, 400)

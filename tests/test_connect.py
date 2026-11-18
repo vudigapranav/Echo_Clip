@@ -3,6 +3,7 @@ stand-ins answering the way their documentation says, so nothing leaves this mac
 import json, os, sys, tempfile, time
 from urllib.parse import parse_qs, urlparse
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-connect-")
+os.environ["PEAKCUT_KEYCHAIN"] = "0"     # tests never touch the real Keychain
 os.environ.update(DATABASE_URL="", PEAKCUT_ACCOUNTS="1", PEAKCUT_PUBLIC_URL="https://clips.example.com", PEAKCUT_VERIFY_EMAIL="0",
                   GOOGLE_CLIENT_ID="", GOOGLE_CLIENT_SECRET="", GOOGLE_CLIENT_FILE="", PEAKCUT_IG_APP_ID="", PEAKCUT_IG_APP_SECRET="",
                   PEAKCUT_TIKTOK_CLIENT_KEY="", PEAKCUT_TIKTOK_CLIENT_SECRET="")

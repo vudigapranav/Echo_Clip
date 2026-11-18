@@ -6,6 +6,7 @@ import sys
 import tempfile
 
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-ai-")
+os.environ["PEAKCUT_KEYCHAIN"] = "0"     # tests never touch the real Keychain
 os.environ["DATABASE_URL"] = ""
 os.environ.update(PEAKCUT_AI_PROVIDER="gemini", PEAKCUT_AI_MODELS="model-a, model-b", PEAKCUT_AI_KEY="test-key-123456", PEAKCUT_AI_BASE_URL="")
 sys.path.insert(0, ".")

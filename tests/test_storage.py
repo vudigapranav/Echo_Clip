@@ -5,7 +5,7 @@ from pathlib import Path
 base = Path(tempfile.mkdtemp(prefix="pc-stor-"))
 old, new, pointer = base / "old-data", base / "bigger drive" / "PeakCut", base / "storage.json"
 os.environ.pop("PEAKCUT_DATA", None); os.environ.pop("PEAKCUT_MODELS", None)
-os.environ.update(DATABASE_URL="", PEAKCUT_STORAGE_FILE=str(pointer), PEAKCUT_ACCOUNTS="0", PEAKCUT_PUBLIC_URL="http://127.0.0.1:8765")
+os.environ.update(PEAKCUT_KEYCHAIN="0", DATABASE_URL="", PEAKCUT_STORAGE_FILE=str(pointer), PEAKCUT_ACCOUNTS="0", PEAKCUT_PUBLIC_URL="http://127.0.0.1:8765")
 pointer.write_text(json.dumps({"path": str(old)}))
 sys.path.insert(0, ".")
 from fastapi.testclient import TestClient

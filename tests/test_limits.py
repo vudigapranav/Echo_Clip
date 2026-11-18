@@ -2,6 +2,7 @@
 at once, any number of creators. Runs against the code directly, with its own empty data folder."""
 import os, sys, tempfile
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-lim-")
+os.environ["PEAKCUT_KEYCHAIN"] = "0"     # tests never touch the real Keychain
 for k in ("PEAKCUT_MAX_LIVE_PER_USER", "PEAKCUT_MAX_JOBS_PER_USER", "PEAKCUT_MAX_UPLOAD_MB", "PEAKCUT_MAX_VIDEO_HOURS",
           "PEAKCUT_MAX_LIVE_HOURS", "PEAKCUT_MAX_USER_GB", "PEAKCUT_MAX_CREATORS"):
     os.environ.pop(k, None)

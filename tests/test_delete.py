@@ -2,6 +2,7 @@
 with its own empty data folder: nothing outside it is touched."""
 import os, sys, tempfile, zipfile
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-del-"); os.environ["DATABASE_URL"] = ""
+os.environ["PEAKCUT_KEYCHAIN"] = "0"     # tests never touch the real Keychain
 sys.path.insert(0, ".")
 from pathlib import Path
 import sqlalchemy as sa

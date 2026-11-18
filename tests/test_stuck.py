@@ -2,6 +2,7 @@
 keeping the whole video "in progress". Runs against the code directly, with its own empty data folder."""
 import os, re, sys, tempfile, threading, time
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-stuck-"); os.environ["DATABASE_URL"] = ""; os.environ["PEAKCUT_CLIP_MINUTES"] = "0.03"
+os.environ["PEAKCUT_KEYCHAIN"] = "0"     # tests never touch the real Keychain
 sys.path.insert(0, ".")
 from concurrent.futures import ThreadPoolExecutor
 from studio import brain, jobs, render, roman

@@ -3,6 +3,7 @@ and an AI model name the service does not know. Runs against the code directly; 
 import io, os, shutil, sys, tarfile, tempfile
 from pathlib import Path
 os.environ["PEAKCUT_DATA"] = tempfile.mkdtemp(prefix="pc-tools-"); os.environ["DATABASE_URL"] = ""
+os.environ["PEAKCUT_KEYCHAIN"] = "0"     # tests never touch the real Keychain
 os.environ.pop("PEAKCUT_MODELS", None)          # this test makes and removes a model: only ever inside its own folder
 os.environ.update(PEAKCUT_AI_PROVIDER="gemini", PEAKCUT_AI_MODELS="gemini-old", PEAKCUT_AI_KEY="test-key-123456")
 sys.path.insert(0, ".")
