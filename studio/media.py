@@ -19,13 +19,18 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # minutes, with a clear message, instead of each one waiting to fail. Then the next link simply tries again.
 YT_PAUSE = 600
 _yt_refused_until = 0.0
-YT_BLOCKED = ("YouTube isn't letting PeakCut download videos right now. Upload the video file instead, or use a "
-              "Twitch or Kick link. YouTube links will be tried again in a few minutes.")
+UPLOAD_INSTEAD = "Unable to download this video. You can upload an authorized local copy instead."
+YT_BLOCKED = (UPLOAD_INSTEAD + " (YouTube is refusing downloads from this computer right now; Echo Clip does not try to "
+              "get around that. YouTube links are tried again in a few minutes.)")
 _BOT_CHECK = re.compile(r"not a bot|confirm you.?re not|sign in to confirm(?! your age)", re.I)
 
 
 class YouTubeBlocked(RuntimeError):
     pass
+
+
+class DownloadFailed(RuntimeError):
+    """A link that could not be fetched: the page then offers to upload a local copy instead."""
 
 
 def is_youtube(url: str) -> bool:
@@ -302,6 +307,76 @@ def probe(path: Path) -> dict:
     if rot.lstrip("-") in ("90", "270"):
         w, h = h, w
     return {"width": w, "height": h, "duration": float(data["format"]["duration"])}
+
+
+UPLOAD_FORMATS = ("MP4", "MOV", "MKV", "WebM", "AVI", "M4V")
+
+
+class BadVideo(ValueError):
+    """A file that is not a video Echo Clip can clip, with the reason in plain words."""
+
+
+def inspect(path: Path) -> dict:
+    """Look inside an uploaded file, whatever its name says: a video stream, a sound stream, a real length and
+    size, and a picture that really decodes. Raises BadVideo with the reason; returns the details otherwise."""
+    try:
+        p = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                           creationflags=NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        raise BadVideo("Echo Clip couldn't read this file in time. It may be damaged.")
+    except OSError as e:
+        raise BadVideo(f"Echo Clip couldn't inspect the file: {e}")
+    if p.returncode != 0:
+        why = p.stderr.strip().splitlines()[-1] if p.stderr.strip() else ""
+        if "Invalid data" in why or "moov atom not found" in why or "EBML header parsing failed" in why:
+            raise BadVideo("This file isn't a video Echo Clip can read: it is damaged, incomplete, or not a video at all.")
+        raise BadVideo("Echo Clip couldn't read this file" + (f" ({why[-160:]})" if why else "") + ".")
+    try:
+        data = json.loads(p.stdout or "{}")
+    except ValueError:
+        raise BadVideo("Echo Clip couldn't read this file's details.")
+    streams = data.get("streams") or []
+    fmt = data.get("format") or {}
+    video = next((s for s in streams if s.get("codec_type") == "video"
+                  and not (s.get("disposition") or {}).get("attached_pic")), None)       # cover art is not a video
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    if not video:
+        raise BadVideo("This file has no video in it (it may be sound only). Upload the recording itself.")
+    if not audio:
+        raise BadVideo("This video has no sound track, so there is nothing to transcribe and no moments can be found.")
+    try:
+        w, h = int(video["width"]), int(video["height"])
+    except (KeyError, TypeError, ValueError):
+        raise BadVideo("Echo Clip couldn't tell this video's picture size. It may be damaged.")
+    if w * h > 3840 * 2160 or w < 16 or h < 16:
+        raise BadVideo(f"This video is {w}×{h}. Echo Clip works with videos up to 4K (3840×2160).")
+    rot = str((video.get("side_data_list") or [{}])[0].get("rotation", "0"))
+    if rot.lstrip("-") in ("90", "270"):
+        w, h = h, w
+    try:
+        dur = float(fmt.get("duration") or video.get("duration") or 0)
+    except ValueError:
+        dur = 0.0
+    if dur <= 0.5:
+        raise BadVideo("This video has no length that Echo Clip can read. It may be incomplete.")
+    if dur > config.MAX_VIDEO_HOURS * 3600:
+        raise BadVideo(f"This video is longer than {config.MAX_VIDEO_HOURS:g} hours, which is the limit on this computer.")
+    # a header can look fine while the picture itself cannot be decoded: decode one frame from the middle
+    d = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{min(dur / 2, 30):.2f}", "-i", str(path), "-frames:v", "1",
+                        "-f", "null", "-"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                       creationflags=NO_WINDOW)
+    if d.returncode != 0:
+        raise BadVideo("This video's picture can't be decoded (an unsupported or damaged video stream).")
+    try:
+        num, den = (video.get("avg_frame_rate") or "0/1").split("/")
+        fps = round(float(num) / float(den), 2) if float(den) else 0.0
+    except ValueError:
+        fps = 0.0
+    return {"width": w, "height": h, "duration": round(dur, 2), "fps": fps,
+            "video_codec": video.get("codec_name", ""), "audio_codec": audio.get("codec_name", ""),
+            "container": (fmt.get("format_long_name") or fmt.get("format_name") or "")[:60],
+            "size": int(fmt.get("size") or 0)}
 
 
 def extract_audio(src: Path, wav: Path):
