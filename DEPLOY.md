@@ -1,3 +1,6 @@
+> **Echo Clip is meant to run on your own Mac** (see README.md). This file is the server guide inherited from
+> PeakCut, kept for reference; nothing in Echo Clip deploys anything by itself.
+
 # Putting PeakCut on a server
 
 PeakCut runs as three containers on one Linux server: the app, PostgreSQL, and Caddy (which handles HTTPS).

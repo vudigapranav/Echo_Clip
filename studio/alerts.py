@@ -46,7 +46,7 @@ def notify(text: str, kind: str = "live", link: str = ""):
     except Exception:  # noqa: BLE001
         pass
     if configured():
-        threading.Thread(target=ctx.bind(send), args=("PeakCut: " + text,), daemon=True).start()
+        threading.Thread(target=ctx.bind(send), args=("Echo Clip: " + text,), daemon=True).start()
 
 
 def digest_loop(make_summary):

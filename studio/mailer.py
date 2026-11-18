@@ -2,8 +2,8 @@
 
 Works with any provider that offers SMTP: Resend, Postmark, Brevo, Amazon SES, Google Workspace and so on. Set
 PEAKCUT_SMTP_HOST, PEAKCUT_SMTP_PORT (587), PEAKCUT_SMTP_USER, PEAKCUT_SMTP_PASSWORD_FILE (a file holding the
-password or API key) and PEAKCUT_MAIL_FROM ("PeakCut <hello@yourdomain.com>"). Without them nothing is sent and the
-link is written to the server log instead, which is enough for running PeakCut on your own machine."""
+password or API key) and PEAKCUT_MAIL_FROM ("Echo Clip <hello@yourdomain.com>"). Without them nothing is sent and the
+link is written to the server log instead, which is enough for running Echo Clip on your own machine."""
 import html
 import logging
 import smtplib
@@ -39,7 +39,7 @@ def _html(title: str, intro: str, button: str, link: str, outro: str, logo_src: 
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F4EEEA"><tr><td align="center" style="padding:36px 14px">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px">
     <tr><td style="padding:0 6px 22px"><a href="{e(site)}" style="text-decoration:none">
-      <img src="{e(logo_src)}" width="138" height="38" alt="PeakCut" style="display:block;border:0;width:138px;height:38px"></a></td></tr>
+      <img src="{e(logo_src)}" width="138" height="38" alt="Echo Clip" style="display:block;border:0;width:138px;height:38px"></a></td></tr>
     <tr><td style="background:#ffffff;border-radius:18px;border:1px solid #EAE2DC;padding:36px 34px">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
         <tr><td style="font-family:{font};font-size:24px;line-height:1.25;font-weight:700;color:#2A1A12;padding-bottom:12px">{e(title)}</td></tr>
@@ -53,14 +53,14 @@ def _html(title: str, intro: str, button: str, link: str, outro: str, logo_src: 
           Button not working? Copy this link into your browser:<br><a href="{e(link)}" style="color:#A9480A;word-break:break-all">{e(link)}</a></td></tr>
       </table></td></tr>
     <tr><td align="center" style="padding:24px 10px 0;font-family:{font};font-size:12px;line-height:1.7;color:#9C8A7E">
-      You're getting this because of your PeakCut account. We only email you about your account.<br>
-      <a href="{e(site)}" style="color:#7A6A60;text-decoration:underline">PeakCut</a> &nbsp;·&nbsp;
+      You're getting this because of your Echo Clip account. We only email you about your account.<br>
+      <a href="{e(site)}" style="color:#7A6A60;text-decoration:underline">Echo Clip</a> &nbsp;·&nbsp;
       <a href="{e(site)}/privacy" style="color:#7A6A60;text-decoration:underline">Privacy</a> &nbsp;·&nbsp;
       <a href="{e(site)}/terms" style="color:#7A6A60;text-decoration:underline">Terms</a></td></tr>
   </table></td></tr></table></body></html>"""
 
 
-def preview(title="Confirm your email", intro="Thanks for joining PeakCut. Confirm this is your email address to start clipping.",
+def preview(title="Confirm your email", intro="Thanks for joining Echo Clip. Confirm this is your email address to start clipping.",
             button="Confirm my email", link=None, outro="The link works for 3 days. If you didn't sign up, you can ignore this email.") -> str:
     """The same email for viewing in a browser: the logo is inlined so it shows without an email app."""
     import base64
@@ -74,11 +74,11 @@ def send(to: str, subject: str, title: str, intro: str, button: str, link: str, 
         if config.HTTPS:      # a real site: a sign-in link must never sit in a log file
             log.warning("Email not set up, so nothing was sent: %s", subject)
         else:                 # on your own computer the link is printed so you can use it
-            print(f"[PeakCut mail] {subject} for {to}: {link}", flush=True)
+            print(f"[Echo Clip mail] {subject} for {to}: {link}", flush=True)
         return False
     msg = EmailMessage()
     name, addr = parseaddr(config.MAIL_FROM)
-    msg["From"] = formataddr((name or "PeakCut", addr))
+    msg["From"] = formataddr((name or "Echo Clip", addr))
     msg["To"] = to
     msg["Subject"] = subject
     msg["Message-ID"] = make_msgid(domain=addr.split("@")[-1] if "@" in addr else None)
@@ -103,7 +103,7 @@ def send(to: str, subject: str, title: str, intro: str, button: str, link: str, 
                     s.send_message(msg)
         except Exception as e:  # noqa: BLE001
             log.error("Could not send %r to %s: %s", subject, to, e)
-            print(f"[PeakCut mail] could not send {subject!r} to {to}: {e}", flush=True)
+            print(f"[Echo Clip mail] could not send {subject!r} to {to}: {e}", flush=True)
 
     threading.Thread(target=work, daemon=True).start()
     return True

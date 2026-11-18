@@ -1,5 +1,5 @@
 """The speech-to-text machine: a tiny service that turns pieces of audio into words, meant for a machine with a
-graphics card. The main PeakCut server sends it pieces and gets the words back (see studio/transcribe.py).
+graphics card. The main Echo Clip server sends it pieces and gets the words back (see studio/transcribe.py).
 
 Run with:  python -m studio.asr_worker
 Settings:  PEAKCUT_ASR_PROVIDER=cuda, PEAKCUT_ASR_TOKEN=<shared secret>, PEAKCUT_ASR_PORT (9000),

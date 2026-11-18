@@ -56,7 +56,7 @@ def ensure() -> None:
             print("  Speech model ready.\n", flush=True)
         except Exception as e:  # noqa: BLE001
             state["error"] = str(e)[-200:]
-            raise RuntimeError("PeakCut couldn't download its speech model (about 480 MB, needed once). Check the "
+            raise RuntimeError("Echo Clip couldn't download its speech model (about 480 MB, needed once). Check the "
                                "internet connection and free disk space, then try again.") from e
         finally:
             state["doing"] = False

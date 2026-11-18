@@ -1,12 +1,12 @@
-"""Is there a newer PeakCut? Compares the version running here with the latest on GitHub, once a minute.
+"""Is there a newer Echo Clip? Compares the version running here with the latest on GitHub, once a minute.
 
-The version here is the git commit this folder was on when PeakCut started (read straight from .git, no git
-program needed). Each minute, in the background, PeakCut asks GitHub which commit the project is on now: one small
+The version here is the git commit this folder was on when Echo Clip started (read straight from .git, no git
+program needed). Each minute, in the background, Echo Clip asks GitHub which commit the project is on now: one small
 request to the same address `git` itself uses, which has no hourly allowance to run out of. Only when that commit
 changes does it ask GitHub's API what was added, to show the list. Nothing about this computer or its users is
 sent. The owner sees a notice in the dashboard within a minute or two, with no restart.
 
-    PEAKCUT_UPDATE_REPO     where to look (default: the project's own repository; a fork points at itself)
+    PEAKCUT_UPDATE_REPO     where to look, as owner/name (no default: Echo Clip does not look unless told where)
     PEAKCUT_UPDATE_BRANCH   which branch (default: main)
     PEAKCUT_UPDATE_CHECK=0  never look"""
 import re
@@ -17,11 +17,11 @@ import httpx
 
 from . import config
 
-REPO = (config.env("PEAKCUT_UPDATE_REPO") or "haziqahmedqasmi/peakcut").strip().strip("/")
+REPO = (config.env("PEAKCUT_UPDATE_REPO") or "").strip().strip("/")      # off unless a repository is named
 BRANCH = (config.env("PEAKCUT_UPDATE_BRANCH") or "main").strip()
 ON = config.env("PEAKCUT_UPDATE_CHECK", "1") != "0" and bool(re.fullmatch(r"[\w.\-]+/[\w.\-]+", REPO))
 EVERY = 60
-UA = {"User-Agent": "PeakCut-update-check"}
+UA = {"User-Agent": "echo-clip-update-check"}
 _state = {"checked": 0.0, "result": None, "seen": "", "notes": None}
 _lock = threading.Lock()
 _started = False
@@ -51,7 +51,7 @@ def current() -> str:
     return ""
 
 
-RUNNING = current()       # the code in memory: what PeakCut is actually running until it is restarted
+RUNNING = current()       # the code in memory: what Echo Clip is actually running until it is restarted
 
 
 def newest() -> str:
@@ -118,7 +118,7 @@ def latest():
 
 
 def start():
-    """Look every minute, in the background, for as long as PeakCut runs."""
+    """Look every minute, in the background, for as long as Echo Clip runs."""
     global _started
     if not ON or _started:
         return

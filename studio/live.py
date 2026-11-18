@@ -650,7 +650,7 @@ def start_session(creator: dict, url=None) -> dict:
     if len(active_mine()) >= config.MAX_LIVE_PER_USER:
         raise ValueError(f"You're already recording {len(active_mine())} streams, the most this server allows at once. Stop one first.")
     if len(active()) >= config.MAX_LIVE_TOTAL or (active() and load.busy()):
-        raise ValueError("PeakCut is recording as many streams as it can right now. Try again in a little while.")
+        raise ValueError("Echo Clip is recording as many streams as it can right now. Try again in a little while.")
     from . import tools
     if tools.missing():
         raise ValueError(tools.HELP)

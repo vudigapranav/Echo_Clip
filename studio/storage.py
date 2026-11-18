@@ -1,10 +1,10 @@
-"""Where PeakCut keeps everything: one folder, which the owner can see, open and move.
+"""Where Echo Clip keeps everything: one folder, which the owner can see, open and move.
 
-Everything PeakCut makes or downloads lives in one folder: the videos, the clips, the recordings, the list of
-creators, the database and the speech model. By default that is the "data" folder inside PeakCut's own folder.
+Everything Echo Clip makes or downloads lives in one folder: the videos, the clips, the recordings, the list of
+creators, the database and the speech model. By default that is the "data" folder inside Echo Clip's own folder.
 It can be moved (to a bigger drive, for instance) from Settings, Storage: the choice is written to storage.json,
-and the next time PeakCut starts it moves what is there and carries on from the new place (see config.py; nothing
-is moved while PeakCut is running, when files are open)."""
+and the next time Echo Clip starts it moves what is there and carries on from the new place (see config.py; nothing
+is moved while Echo Clip is running, when files are open)."""
 import json
 import os
 import subprocess
@@ -29,7 +29,7 @@ def _size(folder: Path) -> int:
 
 
 def used_bytes() -> int:
-    """How much PeakCut's folder holds. Added up at most once a minute."""
+    """How much Echo Clip's folder holds. Added up at most once a minute."""
     if time.time() - _used["at"] > 60:
         _used.update(at=time.time(), bytes=_size(config.DATA_DIR))
     return _used["bytes"]
@@ -46,9 +46,9 @@ def full_message() -> str:
         free = shutil_free(config.DATA_DIR)
     except OSError:
         free = 0.0
-    return (f"The drive PeakCut saves to ({drive_of(config.DATA_DIR)}) is almost full: {free:.1f} GB free, and PeakCut needs "
+    return (f"The drive Echo Clip saves to ({drive_of(config.DATA_DIR)}) is almost full: {free:.1f} GB free, and Echo Clip needs "
             f"at least {load.MIN_FREE_DISK_GB:g} GB to make clips safely. Free up some space on that drive, or move "
-            f"PeakCut's folder to a bigger drive in Settings, Storage.")
+            f"Echo Clip's folder to a bigger drive in Settings, Storage.")
 
 
 def shutil_free(path: Path) -> float:
@@ -76,12 +76,12 @@ def info(local: bool) -> dict:
     return {"path": str(config.DATA_DIR.resolve()), "drive": drive_of(config.DATA_DIR), "free_gb": round(free, 1),
             "total_gb": round(total, 1), "used_gb": round(used_bytes() / 1e9, 2), "min_free_gb": load.MIN_FREE_DISK_GB,
             "full": free < load.MIN_FREE_DISK_GB, "fixed": config.DATA_FROM == "env", "pending": pending(),
-            # opening a folder or showing a "choose folder" window only makes sense on the computer PeakCut runs on
+            # opening a folder or showing a "choose folder" window only makes sense on the computer Echo Clip runs on
             "local": bool(local)}
 
 
 def open_folder():
-    """Show PeakCut's folder in the computer's file manager."""
+    """Show Echo Clip's folder in the computer's file manager."""
     p = str(config.DATA_DIR.resolve())
     if sys.platform == "win32":
         os.startfile(p)                                   # noqa: S606 - the owner's own folder, on their own computer
@@ -92,7 +92,7 @@ def open_folder():
 
 
 _PICK = ("import tkinter as tk\nfrom tkinter import filedialog\nr = tk.Tk()\nr.withdraw()\nr.attributes('-topmost', True)\n"
-         "print(filedialog.askdirectory(title='Choose where PeakCut keeps its videos and clips') or '')\n")
+         "print(filedialog.askdirectory(title='Choose where Echo Clip keeps its videos and clips') or '')\n")
 
 
 def pick_folder() -> str:
@@ -116,22 +116,22 @@ def change(path: str, move: bool = True) -> dict:
         raise ValueError("Choose a folder.")
     new = Path(os.path.expanduser(raw))
     if not new.is_absolute():
-        raise ValueError("Give the whole path of the folder, for example D:\\PeakCut.")
+        raise ValueError("Give the whole path of the folder, for example D:\\Echo Clip.")
     new, old = new.resolve(), config.DATA_DIR.resolve()
     if new == old:
-        raise ValueError("That is the folder PeakCut already uses.")
+        raise ValueError("That is the folder Echo Clip already uses.")
     if old in new.parents or new in old.parents:
-        raise ValueError("Choose a folder that is not inside PeakCut's current folder (or the other way round).")
+        raise ValueError("Choose a folder that is not inside Echo Clip's current folder (or the other way round).")
     try:
         new.mkdir(parents=True, exist_ok=True)
         probe = new / ".peakcut-write-test"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
     except OSError:
-        raise ValueError("PeakCut can't write to that folder. Choose another one, or check the drive is connected.")
+        raise ValueError("Echo Clip can't write to that folder. Choose another one, or check the drive is connected.")
     need = used_bytes() / 1e9 if move and drive_of(new) != drive_of(old) else 0.0
     if shutil_free(new) < need + load.MIN_FREE_DISK_GB:
-        raise ValueError(f"There isn't enough room there: {shutil_free(new):.1f} GB free, and PeakCut needs about "
+        raise ValueError(f"There isn't enough room there: {shutil_free(new):.1f} GB free, and Echo Clip needs about "
                          f"{need + load.MIN_FREE_DISK_GB:.1f} GB.")
     data = {"path": str(new)}
     if move:

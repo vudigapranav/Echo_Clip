@@ -312,7 +312,7 @@ def _youtube_finish(code: str) -> dict:
         "code": code, "client_id": cid, "client_secret": secret,
         "redirect_uri": redirect_for("youtube"), "grant_type": "authorization_code"}, timeout=30), "Google sign-in").json()
     if "refresh_token" not in tok:
-        raise ValueError("Google did not return a long-lived sign-in. Remove PeakCut's access in your Google account and connect again.")
+        raise ValueError("Google did not return a long-lived sign-in. Remove Echo Clip's access in your Google account and connect again.")
     ch = _check(httpx.get("https://www.googleapis.com/youtube/v3/channels", params={"part": "snippet", "mine": "true"},
                           headers={"Authorization": f"Bearer {tok['access_token']}"}, timeout=30), "Reading the channel").json()
     if not ch.get("items"):
@@ -375,7 +375,7 @@ def _instagram_finish(code: str) -> dict:
     if isinstance(short.get("data"), list) and short["data"]:
         short = short["data"][0]
     if "instagram_business_content_publish" not in str(short.get("permissions", "instagram_business_content_publish")):
-        raise ValueError("PeakCut needs permission to publish. Connect again and leave every box ticked.")
+        raise ValueError("Echo Clip needs permission to publish. Connect again and leave every box ticked.")
     long = _check(httpx.get(f"{IG}/access_token", params={"grant_type": "ig_exchange_token", "client_secret": secret,
                                                          "access_token": short["access_token"]}, timeout=30),
                   "Keeping the Instagram sign-in").json()
@@ -484,7 +484,7 @@ def _tt_tokens(form: dict) -> dict:
 def _tiktok_finish(code: str) -> dict:
     tok = _tt_tokens({"code": code, "grant_type": "authorization_code", "redirect_uri": redirect_for("tiktok")})
     if "video.publish" not in str(tok.get("scope", "")):
-        raise ValueError("PeakCut needs permission to post videos. Connect again and allow posting.")
+        raise ValueError("Echo Clip needs permission to post videos. Connect again and allow posting.")
     acc = {"id": f"tt_{tok['open_id']}", "platform": "tiktok", "name": "TikTok account", "added": time.time(),
            "open_id": tok["open_id"], "access_token": tok["access_token"], "refresh_token": tok["refresh_token"],
            "expires": time.time() + int(tok.get("expires_in", 7200)) - 120}
@@ -518,7 +518,7 @@ def _tiktok_creator(acc) -> dict:
     return _tt_post(acc, "/post/publish/creator_info/query/", {}, "Reading the TikTok account")
 
 
-# PeakCut's visibility setting -> what TikTok calls it, best first
+# Echo Clip's visibility setting -> what TikTok calls it, best first
 TT_PRIVACY = {"public": ["PUBLIC_TO_EVERYONE", "FOLLOWER_OF_CREATOR", "MUTUAL_FOLLOW_FRIENDS"],
               "unlisted": ["MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR"], "private": ["SELF_ONLY"]}
 
