@@ -1,7 +1,8 @@
-"""PeakCut web server. Run with:  python -m studio.server
+"""Echo Clip web server. Run with:  python -m studio.server
 
 Public pages:  /  /login  /signup          The app:  /app  (signed-in users only)
 Everything under /api, /media and /oauth needs a session, except /api/auth/* and /api/public."""
+import contextlib
 import hashlib
 import hmac
 import json
@@ -21,8 +22,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from . import admin as admins
 from . import account, load
-from . import (accounts, ai, alerts, auth, config, creators, ctx, db, jobs, live, media, posting,
-               profiles, render, safe, transcribe, usage)
+from . import (accounts, ai, alerts, auth, captions, compose, config, creators, ctx, db, face, headline, highlights, jobs, live,
+               media, music, posting, profiles, render, safe, shaping, subtitles, transcribe, usage, whisper_asr)
 
 from . import tools as _tools  # noqa: E402
 
@@ -34,12 +35,21 @@ def _quiet(fn):
         print(f"  {e}", flush=True)
 
 
-app = FastAPI(title="PeakCut", docs_url=None, redoc_url=None, openapi_url=None)
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    """Everything done once when the server starts (see _more_threads and _startup below)."""
+    await _more_threads()
+    _startup()
+    yield
+
+
+app = FastAPI(title="Echo Clip", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
 WEB = config.ROOT / "web"
 OPEN = ("/api/auth/", "/pub/", "/api/public", "/auth/google/", "/auth/verify", "/brand/", "/assets/", "/healthz", "/favicon.ico", "/robots.txt", "/sitemap.xml")
 PAGES = {"/": "landing.html", "/login": "auth.html", "/signup": "auth.html", "/reset": "reset.html",
          "/privacy": "legal.html", "/terms": "legal.html", "/acceptable-use": "legal.html"}
-VIDEO_TYPES = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".ts", ".flv"}
+VIDEO_TYPES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".ts", ".flv"}
+NOT_VIDEO = "Upload a video file: MP4, MOV, MKV, WebM, AVI or M4V."
 CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
        "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; "
        "frame-src https://player.twitch.tv https://www.youtube-nocookie.com https://player.kick.com; "
@@ -49,13 +59,11 @@ CSP = ("default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 
 BOOT = f"{int(time.time()) % 100000:x}"     # part of every sync token, so pages reload their data after a restart
 
 
-@app.on_event("startup")
 async def _more_threads():
     import anyio.to_thread
     anyio.to_thread.current_default_thread_limiter().total_tokens = int(config.env("PEAKCUT_REQUEST_THREADS", "64"))
 
 
-@app.on_event("startup")
 def _startup():
     db.init()
     for f in (config.TMP_DIR / "uploads").glob("*"):      # uploads cut short by a restart
@@ -64,6 +72,13 @@ def _startup():
         except OSError:
             pass
     render.install_fonts()
+    render.clear_leftovers()                         # clips that were half made when Echo Clip last closed
+    threading.Thread(target=lambda: _quiet(music.ensure_builtin), daemon=True).start()   # the built-in music (once)
+    try:
+        if ai.migrate_key():                         # a key saved by an earlier version: into the Keychain, checked
+            print("  Your AI key was moved into the macOS Keychain.", flush=True)
+    except Exception as e:  # noqa: BLE001 - it stays where it was
+        print(f"  The AI key stays in ai.json ({e}).", flush=True)
     if _tools.missing():
         print("\n  " + _tools.HELP + "\n", flush=True)
     if not transcribe.REMOTE and config.env("PEAKCUT_FETCH_MODEL", "1") != "0":     # the speech model: fetched now, in the background, if it was never downloaded
@@ -73,7 +88,7 @@ def _startup():
     live.start()
     posting.start()
     from . import updates
-    updates.start()                  # looks for a newer PeakCut every minute, in the background
+    updates.start()                  # looks for a newer Echo Clip every minute, in the background
 
 
 # ================================================================ the gate: who is asking, and are they allowed
@@ -131,7 +146,7 @@ class Gate:
             # must have been asked for by its real address (a number, "localhost", or the address in settings),
             # so another website cannot reach it through a made-up name that points at this machine.
             if not _own_address(req.headers.get("host", "")):
-                return await deny(403, "Open PeakCut by its own address.")
+                return await deny(403, "Open Echo Clip by its own address.")
             if path == "/" or path == "/reset" or path.startswith("/auth/"):
                 return await deny(303, "", redirect="/app")
             if path.startswith("/api/auth/") and path != "/api/auth/me":
@@ -262,7 +277,7 @@ def _ip(request: Request) -> str:
 
 
 def _from_here(req, must_say=False) -> bool:
-    """Did this change come from PeakCut's own page, and not from another website?
+    """Did this change come from Echo Clip's own page, and not from another website?
 
     The browser's own answer is trusted first: it marks every request "same-origin" or not, and a web page cannot
     fake that mark. Comparing the page's address with the address the request arrived at is only the fallback,
@@ -277,7 +292,7 @@ def _from_here(req, must_say=False) -> bool:
 
 
 def _own_address(host: str) -> bool:
-    """Is this the address PeakCut is really reached by? A number (127.0.0.1, 192.168.1.20), "localhost", or the
+    """Is this the address Echo Clip is really reached by? A number (127.0.0.1, 192.168.1.20), "localhost", or the
     host in PEAKCUT_PUBLIC_URL."""
     import ipaddress
     name = host.strip().lower()
@@ -361,9 +376,9 @@ def reset_page():
 
 
 LEGAL = {
-    "privacy": ("Privacy Policy", "How PeakCut collects, uses and protects your data, including Google user data, cookies and your privacy rights."),
-    "terms": ("Terms of Service", "The terms for using PeakCut, the AI clipping tool for streams and videos: accounts, availability and liability."),
-    "acceptable-use": ("Acceptable Use Policy", "What you may and may not do with PeakCut, the AI stream clipping tool."),
+    "privacy": ("Privacy Policy", "How Echo Clip collects, uses and protects your data, including Google user data, cookies and your privacy rights."),
+    "terms": ("Terms of Service", "The terms for using Echo Clip, the AI clipping tool for streams and videos: accounts, availability and liability."),
+    "acceptable-use": ("Acceptable Use Policy", "What you may and may not do with Echo Clip, the AI stream clipping tool."),
 }
 
 
@@ -378,9 +393,9 @@ def legal_page(request: Request):
     contact = config.CONTACT_EMAIL
     who = (f'<a href="mailto:{_h.escape(contact)}">{_h.escape(contact)}</a>' if contact
            else "the contact details on our website")
-    name = _h.escape(config.LEGAL_NAME or "PeakCut")
+    name = _h.escape(config.LEGAL_NAME or "Echo Clip")
     law = (f"the laws of {_h.escape(config.LEGAL_COUNTRY)}" if config.LEGAL_COUNTRY
-           else "the laws of the country where PeakCut's operator is established")
+           else "the laws of the country where Echo Clip's operator is established")
     out = (_LEGAL_HTML or (WEB / "legal.html").read_text(encoding="utf-8"))
     for k, v in {"{{CONTACT}}": who, "{{PAGE}}": page, "{{PAGE_PATH}}": page, "{{SITE}}": _h.escape(config.PUBLIC_URL),
                  "{{NAME}}": name, "{{LAW}}": law, "{{TITLE}}": title, "{{DESC}}": desc}.items():
@@ -394,8 +409,15 @@ _LEGAL_HTML = ""
 @app.get("/app")
 @app.get("/app/{rest:path}")
 def app_page(rest: str = ""):
-    """Every app address (/app/videos, /app/creators/<id>/setup ...) is the same page; it shows the right view."""
+    """Every app address (/app/videos, /app/settings/ai ...) is the same page; it shows the right view."""
     return _page("index.html")
+
+
+@app.get("/classic")
+@app.get("/classic/{rest:path}")
+def classic_page(rest: str = ""):
+    """The classic studio: creator workspaces, live recording and posting, as they were."""
+    return _page("classic.html")
 
 
 @app.get("/admin")
@@ -573,8 +595,17 @@ def status(request: Request):
     me_ = _me(request)
     return {"user": auth.public(me_), "update": updates.latest() if me_.is_admin else None, "accounts": config.ACCOUNTS, "disk_full": load.disk_full(), "no_ffmpeg": bool(_tools.missing()), "links": {"repo": config.REPO_URL, "follow": config.FOLLOW_URL}, "ai": usage.brief(), "unread": notices.unread(),
             "tour": not accounts.settings()["tour_done"],
-            "youtube": accounts.youtube_ready(), "connect": {p: accounts.can_connect(p) for p in accounts.PLATFORM_NAMES}, "max_upload_mb": config.MAX_UPLOAD_MB, "upload_part_mb": config.UPLOAD_PART_MB, "max_batch": config.MAX_ACTIVE_JOBS_PER_USER,
-            "styles": {k: v["label"] for k, v in render.STYLES.items()}, "layouts": render.LAYOUTS}
+            "youtube": accounts.youtube_ready(), "connect": {p: accounts.can_connect(p) for p in accounts.PLATFORM_NAMES}, "max_upload_mb": config.MAX_UPLOAD_MB if config.MAX_UPLOAD_MB < 10 ** 6 else 0, "upload_part_mb": config.UPLOAD_PART_MB, "upload_formats": list(media.UPLOAD_FORMATS), "disk_free_gb": round(shutil.disk_usage(config.DATA_DIR).free / 1e9, 1), "keep_free_gb": load.MIN_FREE_DISK_GB, "max_batch": config.MAX_ACTIVE_JOBS_PER_USER,
+            "styles": {k: v["label"] for k, v in render.STYLES.items()}, "layouts": render.LAYOUTS,
+            "captions": captions.public(), "rank_modes": highlights.MODES, "durations": list(highlights.DURATIONS),
+            "categories": highlights.CATEGORY_LABELS, "defaults": jobs.DEFAULTS, "render_quality": list(render.QUALITY),
+            "face_detection": face.available(),
+            "languages": {"auto": "Detect automatically", "hinglish": "Hinglish (Hindi + English)", **whisper_asr.NAMES},
+            "caption_langs": subtitles.MODES, "headline": {"langs": headline.LANGS, "anims": headline.ANIMS,
+            "positions": headline.POSITIONS, "styles": {k: v["label"] for k, v in captions.HEADLINE_STYLES.items()},
+            "defaults": headline.BASE}, "music": {"categories": music.CATEGORIES, "defaults": music.defaults()},
+            "hindi_text_ok": shaping.ok(), "multilingual": {"installed": whisper_asr.available(), "ready": whisper_asr.ready(),
+            "model": whisper_asr.MODEL, "device": whisper_asr.state.get("device", "")}}
 
 
 # ================================================================ videos
@@ -700,7 +731,7 @@ def link_preview(request: Request, url: str = ""):
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(422, "Couldn't open that video. Check the link is public and complete.")
+        raise HTTPException(422, "Couldn't open that video. Check the link is complete. " + media.UPLOAD_INSTEAD)
 
 
 @app.post("/api/jobs")
@@ -740,7 +771,7 @@ def create_from_file(file: UploadFile = File(...), options: str = Form("{}"), cr
     name = re.sub(r"[^\w.\- ]", "_", Path(file.filename or "video.mp4").name)[:120]
     ext = Path(name).suffix.lower()
     if ext not in VIDEO_TYPES:
-        raise HTTPException(400, "Upload a video file (mp4, mov, mkv or webm).")
+        raise HTTPException(400, NOT_VIDEO)
     if creator and not creators.get(creator):
         raise HTTPException(404, "No such creator")
     try:
@@ -770,9 +801,35 @@ def create_from_file(file: UploadFile = File(...), options: str = Form("{}"), cr
         shutil.move(str(tmp), dest)
     finally:
         tmp.unlink(missing_ok=True)
+    return _start_uploaded(job, dest)
+
+
+def _room_for(size: int):
+    """Is there room on the drive for a video this big (and the spare room Echo Clip always keeps)?"""
+    free = shutil.disk_usage(config.DATA_DIR).free
+    need = size + load.MIN_FREE_DISK_GB * 1e9
+    if free < need:
+        raise HTTPException(507, f"There isn't enough free disk space for this video: it needs {need / 1e9:.1f} GB "
+                                 f"(the file plus {load.MIN_FREE_DISK_GB:g} GB spare) and the drive has {free / 1e9:.1f} GB free. "
+                                 "Free up some space, or move Echo Clip's folder in Settings, Storage.")
+
+
+def _start_uploaded(job, dest: Path):
+    """An uploaded file joins the same pipeline as a downloaded one, once it is known to be a real video: a video
+    stream that decodes, a sound track and a length. Otherwise it is removed and the reason given."""
+    try:
+        info = media.inspect(dest)
+    except media.BadVideo as e:
+        jobs.delete(job["id"])
+        _disk.pop(ctx.uid(), None)
+        raise HTTPException(422, str(e))
     job["source"]["path"] = str(dest)
+    job["source"]["media"] = info
+    job.update(width=info["width"], height=info["height"], duration=info["duration"])
     jobs.enqueue(job)
-    return jobs.public(job)
+    out = jobs.public(job)
+    out["media"] = info
+    return out
 
 
 # ---------------------------------------------------------------- big files, sent in pieces
@@ -821,14 +878,15 @@ def upload_start(body: dict = Body(...)):
     name = re.sub(r"[^\w.\- ]", "_", Path(str(body.get("name") or "video.mp4")).name)[:120]
     ext = Path(name).suffix.lower()
     if ext not in VIDEO_TYPES:
-        raise HTTPException(400, "Upload a video file (mp4, mov, mkv or webm).")
+        raise HTTPException(400, NOT_VIDEO)
     size = body.get("size")
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
         raise HTTPException(400, "Bad file size.")
-    if size > config.MAX_UPLOAD_MB * 1024 * 1024:
-        raise HTTPException(413, f"That file is too big. The limit is {config.MAX_UPLOAD_MB} MB.")
+    if config.MAX_UPLOAD_MB < 10 ** 6 and size > config.MAX_UPLOAD_MB * 1024 * 1024:     # only when a limit was set
+        raise HTTPException(413, f"That file is too big. The limit on this computer is {config.MAX_UPLOAD_MB} MB.")
     if _disk.get(ctx.uid(), (0, 0))[1] + size > config.MAX_USER_GB * 1e9:
         raise HTTPException(507, "There isn't room for this file in your storage. Delete some older videos to make room.")
+    _room_for(size)
     creator = str(body.get("creator") or "")
     if creator and not creators.get(creator):
         raise HTTPException(404, "No such creator")
@@ -903,18 +961,30 @@ def upload_finish(upid: str):
             raise HTTPException(400, "Those options aren't valid.")
         dest = jobs.job_dir(job["id"]) / ("source" + meta["ext"])
         try:
-            with dest.open("wb") as out:
-                for p in parts:
+            # joined in place: each piece is added to the first and then removed, so the file never takes twice
+            # its size on the drive while it is put together
+            with parts[0].open("ab") as out:
+                for p in parts[1:]:
                     with p.open("rb") as src:
                         shutil.copyfileobj(src, out, 4 * 1024 * 1024)
+                    p.unlink()
+            parts[0].replace(dest)
         except OSError:
             jobs.delete(job["id"])
-            raise HTTPException(507, "There wasn't room to save this file. Delete some older videos and try again.")
+            shutil.rmtree(d, ignore_errors=True)
+            raise HTTPException(507, "There wasn't room to save this file. Free up some space and upload it again.")
         shutil.rmtree(d, ignore_errors=True)
     _disk.pop(ctx.uid(), None)
-    job["source"]["path"] = str(dest)
-    jobs.enqueue(job)
-    return jobs.public(job)
+    return _start_uploaded(job, dest)
+
+
+@app.get("/api/upload/{upid}")
+def upload_state(upid: str):
+    """Which pieces of an upload have arrived, so one that was cut off can carry on where it stopped."""
+    meta = _up_get(upid)
+    d = _up_root() / f"up-{upid}"
+    have = sorted(int(p.name[:5]) for p in d.glob("*.part") if p.name[:5].isdigit())
+    return {"id": upid, "name": meta["name"], "size": meta["size"], "part": meta["part"], "parts": meta["parts"], "have": have}
 
 
 @app.delete("/api/upload/{upid}")
@@ -938,6 +1008,268 @@ def rerender(jid: str, cid: str, body: dict = Body(...)):
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
     return jobs.public(job)
+
+
+@app.post("/api/jobs/{jid}/clips/{cid}/reject")
+def reject_clip(jid: str, cid: str, body: dict = Body(default={})):
+    job = _job_or_404(jid)
+    if not any(c["id"] == cid for c in job["clips"]):
+        raise HTTPException(404, "No such clip")
+    jobs.set_rejected(jid, cid, bool(body.get("rejected", True)))
+    return jobs.public(job)
+
+
+@app.post("/api/jobs/{jid}/candidates/{cand}/make")
+def make_from_candidate(jid: str, cand: str):
+    """Turn a moment that was found but not picked into a clip. No AI call: it was ranked with the others."""
+    job = _job_or_404(jid)
+    if job["status"] in ("queued", "running"):
+        raise HTTPException(409, "This video is still being worked on. Try again when it has finished.")
+    if not (job.get("source_path") and Path(job["source_path"]).is_file()) and job["source"].get("type") != "url":
+        raise HTTPException(409, "The source video of this project was removed, so no new clips can be made from it.")
+    _throttle("render:" + ctx.uid(), 20, 600, "That's a lot of clips in a short time. Wait a few minutes.")
+    try:
+        jobs.add_candidate(jid, cand)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return jobs.public(job)
+
+
+@app.post("/api/jobs/{jid}/drop-source")
+def drop_source(jid: str):
+    """Free the room the source video takes. The finished clips stay; they can no longer be re-made."""
+    job = _job_or_404(jid)
+    if job["status"] in ("queued", "running", "live") or any(c.get("status") in ("queued", "rendering") for c in job["clips"]):
+        raise HTTPException(409, "This video is still being worked on. Try again when it has finished.")
+    f = Path(job.get("source_path") or "")
+    freed = 0
+    if job["source"].get("type") == "url" and f.is_file() and f.parent == Path(job["dir"]):
+        freed = f.stat().st_size
+        f.unlink()
+    elif job["source"].get("type") == "file" and f.is_file() and f.parent == Path(job["dir"]):
+        freed = f.stat().st_size
+        f.unlink()
+    jobs.save(job)
+    _disk.pop(ctx.uid(), None)
+    return {"freed_mb": round(freed / 1e6, 1)}
+
+
+# ---------------------------------------------------------------- music library
+@app.get("/api/music")
+def music_list():
+    return music.public()
+
+
+@app.post("/api/music")
+def music_add(file: UploadFile = File(...), title: str = Form(""), category: str = Form("energetic"),
+              licence: str = Form(""), rights: str = Form("")):
+    """Add a track. Only music the owner may use: they confirm it, and say where it comes from."""
+    if rights not in ("1", "true", "yes"):
+        raise HTTPException(400, "Confirm that you made this music, bought a licence for it, or that it is free to use.")
+    name = re.sub(r"[^\w.\- ]", "_", Path(file.filename or "track.mp3").name)[:120]
+    if Path(name).suffix.lower() not in music.AUDIO_TYPES:
+        raise HTTPException(400, "Upload MP3, WAV, M4A, AAC, FLAC or OGG.")
+    tmp = config.TMP_DIR / f"music-{os.urandom(6).hex()}{Path(name).suffix.lower()}"
+    size = 0
+    try:
+        with tmp.open("wb") as f:
+            while chunk := file.file.read(4 * 1024 * 1024):
+                size += len(chunk)
+                if size > 200 * 1024 * 1024:
+                    raise HTTPException(413, "A music track can be up to 200 MB.")
+                f.write(chunk)
+        try:
+            return music.add(tmp, name, title, category, licence)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+@app.delete("/api/music/{tid}")
+def music_remove(tid: str):
+    if not re.fullmatch(r"[\w\-]{3,40}", tid) or not music.remove(tid):
+        raise HTTPException(404, "No such track")
+    return music.public()
+
+
+@app.put("/api/music/defaults")
+def music_defaults(body: dict = Body(...)):
+    try:
+        return music.set_defaults(body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/api/music/{tid}/file")
+def music_file(tid: str):
+    t = music.get(tid) if re.fullmatch(r"[\w\-]{3,40}", tid) else None
+    if not t:
+        raise HTTPException(404)
+    return FileResponse(music.folder() / t["file"], headers={"Cache-Control": "private, max-age=600"})
+
+
+def _clip_of(jid, cid):
+    job = _job_or_404(jid)
+    clip = next((c for c in job["clips"] if c["id"] == cid), None)
+    if not clip:
+        raise HTTPException(404, "No such clip")
+    return job, clip
+
+
+def _clip_words(job, clip):
+    try:
+        words = json.loads((Path(job["dir"]) / "words.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        words = []
+    return [w for w in (clip.get("fixed_words") or words) if clip["start"] - 0.05 <= w["s"] < clip["end"]]
+
+
+@app.get("/api/jobs/{jid}/clips/{cid}/captions")
+def clip_captions(jid: str, cid: str, mode: str = "", order: str = ""):
+    """The clip's caption lines in a caption language: the words as spoken, and the translation where one has
+    been made (never makes one: see .../translate). For checking a translation against what was said."""
+    job, clip = _clip_of(jid, cid)
+    mode = mode if mode in subtitles.MODES else (clip.get("caption_lang") or job["options"].get("caption_lang") or "original")
+    src = job.get("lang") or "en"
+    to = subtitles.needs_translation(src, mode)
+    ph = subtitles.phrases(_clip_words(job, clip))
+    tr = subtitles.cached(job["dir"], [p["text"] for p in ph], to) if to else {}
+    return {"mode": mode, "source_lang": src, "source_name": whisper_asr.name(src), "to": to, "order": order or clip.get("caption_order"),
+            "lines": [{"s": p["s"], "e": p["e"], "spoken": p["text"], "translation": tr.get(p["text"], "") if to else ""} for p in ph],
+            "missing": sum(1 for p in ph if to and not tr.get(p["text"]))}
+
+
+@app.post("/api/jobs/{jid}/clips/{cid}/translate")
+def clip_translate(jid: str, cid: str, body: dict = Body(default={})):
+    """Translate this clip's captions now (one AI request, kept for every later render), to preview them."""
+    job, clip = _clip_of(jid, cid)
+    mode = body.get("mode") if body.get("mode") in subtitles.MODES else clip.get("caption_lang") or "original"
+    to = subtitles.needs_translation(job.get("lang") or "en", mode)
+    if not to:
+        return clip_captions(jid, cid, mode)
+    _throttle("translate:" + ctx.uid(), 30, 600, "That's a lot of translations in a short time. Wait a few minutes.")
+    if body.get("again"):
+        subtitles.forget(job["dir"])
+    try:
+        usage.set_context(job.get("creator"), job.get("title") or "")
+        subtitles.translate(job["dir"], [p["text"] for p in subtitles.phrases(_clip_words(job, clip))], to,
+                            job.get("lang") or "", job.get("title") or "")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, safe.friendly(e, 300))
+    return clip_captions(jid, cid, mode)
+
+
+@app.get("/api/jobs/{jid}/clips/{cid}/audio-preview")
+def clip_audio_preview(jid: str, cid: str, m: str = ""):
+    """The clip's first 20 seconds of sound with the chosen music, mixed exactly as the render will mix it."""
+    job, clip = _clip_of(jid, cid)
+    if not (job.get("source_path") and Path(job["source_path"]).is_file()) or clip.get("src"):
+        raise HTTPException(409, "The source video isn't here, so the sound can't be previewed.")
+    try:
+        over = music.clean(json.loads(m)) if m else {}
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e) or "Bad music settings.")
+    ms = music.resolve({**(clip.get("music") or {}), **over}, job["options"].get("music"))
+    t = music.pick(ms, clip.get("category"))
+    c2 = dict(clip, music_set=ms, music_path=str(music.folder() / t["file"]) if t else "")
+    try:
+        data = render.audio_preview(Path(job["source_path"]), c2)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
+    return Response(data, media_type="audio/aac", headers={"Cache-Control": "no-store", "X-Track": (t or {}).get("id", "")})
+
+
+@app.get("/api/captions/preview")
+def caption_preview(s: str = "", jid: str = "", cid: str = "", layout: str = "", mode: str = "", order: str = "",
+                    h: str = ""):
+    """A picture of a caption look, drawn by the same code that renders the clips. With a clip, it is drawn on a
+    frame of that clip laid out the way it will be rendered."""
+    try:
+        style = captions.clean(json.loads(s) if s.startswith("{") else (s or captions.DEFAULT))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(400, str(e) or "Bad caption settings.")
+    bg, hook, hook_y, cap_y = None, "WAIT FOR IT", 300, 1380
+    phrases_, sample, hstyle = None, None, "box"
+    try:
+        hset = headline.clean(json.loads(h)) if h else {}
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Bad headline settings.")
+    if jid and cid:
+        job, clip = _clip_of(jid, cid)
+        if job.get("source_path") and Path(job["source_path"]).is_file() and not clip.get("src"):
+            c2 = dict(clip, layout=compose.mode_of(layout) if layout else clip.get("layout"))
+            try:
+                bg, plan = render.frame_preview(Path(job["source_path"]), c2, job["width"], job["height"])
+                hook_y, cap_y = plan["hook_y"], plan["cap_y"]
+            except Exception:  # noqa: BLE001 - a plain background instead
+                bg = None
+        hs = headline.resolve({**(clip.get("headline") or {}), **hset}, job["options"].get("headline"))
+        hook = headline.text_for(clip, hs, job.get("lang") or "en") if hs.get("enabled") else ""
+        hstyle = hs.get("style", "box")
+        # the clip's own first caption line, in the chosen caption language (translations only from the store)
+        ws = _clip_words(job, clip)
+        if ws:
+            m_ = mode if mode in subtitles.MODES else (clip.get("caption_lang") or "original")
+            to = subtitles.needs_translation(job.get("lang") or "en", m_)
+            first = subtitles.phrases(ws)[:1]
+            tr = subtitles.cached(job["dir"], [p["text"] for p in first], to) if to else {}
+            cd = subtitles.build(first[0]["words"] if first else ws[:6], job.get("lang") or "en", m_,
+                                 order or clip.get("caption_order") or "hi_first", tr)
+            if cd["kind"] == "phrases":
+                phrases_ = cd["phrases"]
+            else:
+                sample = cd["words"][:6]
+    elif hset:
+        hook, hstyle = hset.get("text") or hook, hset.get("style", "box")
+    try:
+        img = captions.preview(style, bg, hook=hook, hook_y=hook_y, auto_y=cap_y, phrases=phrases_, sample=sample,
+                               headline_style=hstyle)
+    except RuntimeError as e:                      # Hindi without text shaping: said, not drawn wrong
+        raise HTTPException(500, str(e))
+    return Response(img, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=60"})
+
+
+@app.get("/api/storage/projects")
+def storage_projects():
+    """How much room each project takes: its source video, and its clips and the rest."""
+    out = []
+    for j in jobs.list_jobs():
+        d, src = Path(j["dir"]), Path(j.get("source_path") or "")
+        total = sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) if d.is_dir() else 0
+        s_size = src.stat().st_size if src.is_file() else 0
+        out.append({"id": j["id"], "title": j.get("title") or j["source"].get("name", ""), "status": j["status"],
+                    "created": j["created"], "total_mb": round(total / 1e6, 1), "source_mb": round(s_size / 1e6, 1),
+                    "clips": len(j["clips"])})
+    return out
+
+
+@app.post("/api/storage/cleanup")
+def storage_cleanup(request: Request):
+    """Remove leftovers only: uploads that were never finished, old download zips and stray work files. Never a
+    project, a source video or a finished clip."""
+    _admin(request)
+    freed = 0
+    roots = [config.TMP_DIR / "uploads", config.user_dir(ctx.uid()) / "tmp"]
+    for r in roots:
+        for f in r.rglob("*") if r.is_dir() else []:
+            try:
+                if f.is_file() and time.time() - f.stat().st_mtime > 3600:
+                    freed += f.stat().st_size
+                    f.unlink()
+            except OSError:
+                pass
+    for j in jobs.list_jobs():                   # partial downloads left by an interrupted import
+        if j["status"] in ("queued", "running"):
+            continue
+        for f in Path(j["dir"]).glob("*.part"):
+            try:
+                freed += f.stat().st_size
+                f.unlink()
+            except OSError:
+                pass
+    _disk.pop(ctx.uid(), None)
+    return {"freed_mb": round(freed / 1e6, 1)}
 
 
 @app.delete("/api/jobs/{jid}")
@@ -987,7 +1319,7 @@ def clips_zip(ids: str = ""):
     except ValueError as e:
         raise HTTPException(400, str(e))
     from starlette.background import BackgroundTask
-    return FileResponse(f, filename=f"peakcut-clips-{len(pairs)}.zip", media_type="application/zip",
+    return FileResponse(f, filename=f"echo-clip-{len(pairs)}-clips.zip", media_type="application/zip",
                         headers={"Cache-Control": "private, no-store"}, background=BackgroundTask(lambda: f.unlink(missing_ok=True)))
 
 
@@ -1017,6 +1349,15 @@ def delete_my_account(request: Request, body: dict = Body(...)):
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(auth.cookie_args("x")["key"], path="/")
     return resp
+
+
+@app.get("/media/{jid}/source")
+def media_source(jid: str):
+    """The project's own source video, so an opening can be previewed before a clip is re-made."""
+    f = Path(_job_or_404(jid).get("source_path") or "")
+    if not f.is_file() or f.suffix.lower() not in VIDEO_TYPES:
+        raise HTTPException(404)
+    return FileResponse(f, headers={"Cache-Control": "private, max-age=300"})
 
 
 @app.get("/media/{jid}/{name}")
@@ -1051,7 +1392,7 @@ def email_preview(request: Request, kind: str = "verify"):
     from . import mailer
     _admin(request)
     if kind == "reset":
-        page = mailer.preview("Reset your password", "Someone asked to reset the password for this PeakCut account. If that was you, choose a new one below.",
+        page = mailer.preview("Reset your password", "Someone asked to reset the password for this Echo Clip account. If that was you, choose a new one below.",
                               "Choose a new password", config.PUBLIC_URL + "/reset?t=example",
                               "The link works for one hour. If you didn't ask for this, ignore this email and your password stays the same.")
     else:
@@ -1066,9 +1407,9 @@ def test_email(request: Request):
     me_ = _admin(request)
     if not mailer.ready():
         raise HTTPException(400, "No email service is set up yet. Add the PEAKCUT_SMTP settings to .env first.")
-    mailer.send(me_.email, "PeakCut test email", "Your emails are working",
-                "This is a test from your PeakCut server. Account emails like this one will now reach people.",
-                "Open PeakCut", config.PUBLIC_URL + "/app", "You can ignore this message.")
+    mailer.send(me_.email, "Echo Clip test email", "Your emails are working",
+                "This is a test from your Echo Clip server. Account emails like this one will now reach people.",
+                "Open Echo Clip", config.PUBLIC_URL + "/app", "You can ignore this message.")
     return {"sent_to": me_.email}
 
 
@@ -1262,9 +1603,12 @@ def ai_get(request: Request):
 def ai_put(request: Request, body: dict = Body(...)):
     _admin(request)
     k = body.get("key")
+    more = {x: body.get(x) for x in ("temperature", "max_tokens", "timeout", "mode", "allow_fallback", "price_in",
+                                     "price_out", "budget", "fallback") if x in body}
     try:
         out = ai.save(body.get("provider"), body.get("models"), body.get("base_url") or "",
-                      None if k is None or (isinstance(k, str) and not k.strip() and not body.get("remove_key")) else str(k))
+                      None if k is None or (isinstance(k, str) and not k.strip() and not body.get("remove_key")) else str(k),
+                      **more)
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
     usage.forget_all()
@@ -1277,7 +1621,8 @@ def ai_models(request: Request, body: dict = Body(default={})):
     _admin(request)
     _throttle("aimodels:" + ctx.uid(), 30, 600)
     try:
-        return {"models": ai.list_models(body.get("provider"), body.get("base_url"), body.get("key"))}
+        rows = ai.list_models(body.get("provider"), body.get("base_url"), body.get("key"), detail=True)
+        return {"models": [r["id"] for r in rows], "detail": rows}
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # noqa: BLE001
@@ -1286,14 +1631,32 @@ def ai_models(request: Request, body: dict = Body(default={})):
 
 @app.post("/api/ai/test")
 def ai_test(request: Request):
+    """One tiny request (a few tokens) after a free look at the service's catalogue. Says exactly what is wrong:
+    no key, a refused key, no credit, rate limited, unknown model, or the service cannot be reached."""
     _admin(request)
     _throttle("aitest:" + ctx.uid(), 20, 600)
     try:
-        return ai.test()
+        res = ai.test()
     except ValueError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(502, ai.explain(e) or "The AI did not answer: " + _ai_error(e))
+    ctx.bump()
+    if not res.get("ok"):
+        res["message"] = str(res.get("message") or "").replace(ai.key() or "\0", "<key>")
+        return JSONResponse({"detail": res["message"], **res}, 502)
+    return res
+
+
+@app.post("/api/ai/check-model")
+def ai_check_model(request: Request, body: dict = Body(default={})):
+    """Is a model in the service's catalogue? A free lookup, no tokens."""
+    _admin(request)
+    _throttle("aimodels:" + ctx.uid(), 30, 600)
+    model = str(body.get("model") or "").strip()[:120]
+    if not model:
+        raise HTTPException(400, "Enter a model id.")
+    return ai.find_model(body.get("provider") or ai.provider(), model, body.get("key"))
 
 
 # ================================================================ posting, accounts, settings
@@ -1379,9 +1742,9 @@ def public_clip(token: str):
     return FileResponse(f, media_type="video/mp4", headers={"Cache-Control": "private, no-store"})
 
 
-# ---------------------------------------------------------------- where PeakCut keeps everything (Settings, Storage)
+# ---------------------------------------------------------------- where Echo Clip keeps everything (Settings, Storage)
 def _on_this_computer(request: Request) -> bool:
-    """Is the person sitting at the computer PeakCut runs on? Only then can a folder window be opened for them."""
+    """Is the person sitting at the computer Echo Clip runs on? Only then can a folder window be opened for them."""
     host = request.client.host if request.client else ""
     return host in ("127.0.0.1", "::1", "localhost") and not config.env("PEAKCUT_TRUST_PROXY")
 
@@ -1398,7 +1761,7 @@ def storage_open(request: Request):
     from . import storage
     _admin(request)
     if not _on_this_computer(request):
-        raise HTTPException(400, "The folder can only be opened on the computer PeakCut runs on.")
+        raise HTTPException(400, "The folder can only be opened on the computer Echo Clip runs on.")
     try:
         storage.open_folder()
     except OSError as e:
@@ -1411,7 +1774,7 @@ def storage_pick(request: Request):
     from . import storage
     _admin(request)
     if not _on_this_computer(request):
-        raise HTTPException(400, "Type the folder's path instead: a folder window can only be shown on the computer PeakCut runs on.")
+        raise HTTPException(400, "Type the folder's path instead: a folder window can only be shown on the computer Echo Clip runs on.")
     return {"path": storage.pick_folder()}
 
 
@@ -1478,7 +1841,7 @@ def test_alert():
         auth_problem = str(e)
     if auth_problem:
         raise HTTPException(429, auth_problem)
-    problems = alerts.send("PeakCut: test message. Alerts are working.")
+    problems = alerts.send("Echo Clip: test message. Alerts are working.")
     if problems:
         raise HTTPException(400, "; ".join(problems))
     return {"ok": True}
@@ -1535,10 +1898,37 @@ def admin_delete_user(request: Request, uid: str, body: dict = Body(...)):
     return {"ok": True}
 
 
+def _port_free() -> bool:
+    import socket
+    with socket.socket(socket.AF_INET6 if ":" in config.HOST else socket.AF_INET) as sk:
+        # the same option the server itself uses, so connections still closing from a copy that was just stopped
+        # do not count as "in use"
+        sk.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sk.bind((config.HOST, config.PORT))
+            return True
+        except OSError:
+            return False
+
+
 def main():
-    print(f"\n  PeakCut is running:  {config.PUBLIC_URL}\n")
+    from . import shaping
+    shaping.ensure()                                 # Hindi text drawn correctly (may restart this program once)
+    if not _port_free():
+        # Said plainly, before anything starts: usually Echo Clip is simply already open in another window.
+        import urllib.request
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{config.PORT}/healthz", timeout=2)
+            print(f"\n  Echo Clip is already running at {config.PUBLIC_URL}/app  (open that in your browser).\n"
+                  f"  To restart it, stop the other copy first (Ctrl+C in its terminal).\n", flush=True)
+        except Exception:  # noqa: BLE001
+            print(f"\n  Another program is using port {config.PORT}, so Echo Clip can't start there.\n"
+                  f"  Close that program, or start Echo Clip on another port:  PEAKCUT_PORT=8766 .venv/bin/python -m studio.server\n",
+                  flush=True)
+        raise SystemExit(1)
+    print(f"\n  Echo Clip is running:  {config.PUBLIC_URL}/app\n", flush=True)
     if not config.ACCOUNTS and (config.HTTPS or config.HOST not in ("127.0.0.1", "localhost", "::1")):
-        print("  Sign-in is off, so anyone who can reach this address can use PeakCut and its AI key.\n"
+        print("  Sign-in is off, so anyone who can reach this address can use Echo Clip and its AI key.\n"
               "  On a server other people can reach, set PEAKCUT_ACCOUNTS=1 in .env.\n", flush=True)
     if config.env("PEAKCUT_AUTO_RELOAD") == "1":
         # restart by itself whenever the server code changes (pages in web/ never need a restart)

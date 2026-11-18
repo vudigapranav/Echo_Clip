@@ -4,6 +4,7 @@ import json
 import os
 import math
 import queue
+import re
 import shutil
 import threading
 import time
@@ -11,7 +12,8 @@ import traceback
 import uuid
 from pathlib import Path
 
-from . import brain, config, creators, ctx, load, media, render, roman, safe, transcribe, usage
+from . import (ai, brain, captions, compose, config, creators, ctx, face, headline, highlights, load, media, music, render,
+               roman, safe, subtitles, transcribe, usage, whisper_asr)
 
 class _FairQueue:
     """Whose video is next. Each person has their own line and the lines take turns, so someone who adds ten
@@ -107,11 +109,18 @@ _by_user: dict = {}                       # user -> {job id: job}: listing one p
 _lock = threading.RLock()
 on_clip_ready: list = []   # callbacks (job, clip), run once when a clip first finishes
 
-DEFAULTS = {"max_clips": 6, "min_len": 15, "max_len": 60, "style": "bounce", "layout": "blur", "quality": 720,
-            "range_start": None, "range_end": None}
+DEFAULTS = {"max_clips": 5, "min_len": 30, "max_len": 45, "duration": "30-45", "style": "gaming_bold", "layout": "auto",
+            "quality": 720, "range_start": None, "range_end": None, "rank_mode": "balanced", "hook_trim": True,
+            "zoom": "none", "normalize": True, "render_quality": "standard", "auto_render": True, "captions": None,
+            "candidates": 30, "language": "auto", "caption_lang": "original", "caption_order": "hi_first",
+            "headline_lang": "source", "headline": None, "music": None}
 
 
-LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080)}
+LIMITS = {"max_clips": (1, 20), "min_len": (5, 120), "max_len": (10, 180), "quality": (360, 1080), "candidates": (10, 40)}
+CHOICES = {"rank_mode": tuple(highlights.MODES), "zoom": ("none", "slow", "punch"),
+           "render_quality": tuple(render.QUALITY), "duration": (*highlights.DURATIONS, "custom"),
+           "language": ("auto", "hinglish", *whisper_asr.NAMES), "caption_lang": tuple(subtitles.MODES),
+           "caption_order": ("hi_first", "en_first"), "headline_lang": tuple(headline.LANGS)}
 
 
 def clean_options(options) -> dict:
@@ -126,12 +135,24 @@ def clean_options(options) -> dict:
         elif k == "style":
             v = v if v in render.STYLES else DEFAULTS["style"]
         elif k == "layout":
-            v = v if v in render.LAYOUTS else DEFAULTS["layout"]
+            v = compose.mode_of(v)
+        elif k in CHOICES:
+            v = v if v in CHOICES[k] else DEFAULTS[k]
+        elif k in ("hook_trim", "normalize", "auto_render"):
+            v = bool(v) and v not in ("0", "false", "off")
+        elif k == "captions":
+            v = captions.clean(v)
+        elif k == "headline":
+            v = headline.clean(v)
+        elif k == "music":
+            v = music.clean(v)
         else:                                    # range_start, range_end: seconds into the video
             v = float(v)
             if not math.isfinite(v) or v < 0:
                 raise ValueError("That part of the video isn't valid.")
         out[k] = v
+    if out.get("duration") in highlights.DURATIONS:  # a length preset sets the shortest and longest clip
+        out["min_len"], out["max_len"] = highlights.DURATIONS[out["duration"]]
     if out.get("range_end") is not None and out["range_end"] <= out.get("range_start", 0):
         raise ValueError("The end of the chosen part must be after its start.")
     return out
@@ -148,7 +169,9 @@ def public(job) -> dict:
     """What the browser may see: no server paths, no owner id."""
     out = {k: v for k, v in job.items() if k not in HIDDEN}
     out["source"] = {k: v for k, v in job["source"].items() if k != "path"}
-    out["clips"] = [{k: v for k, v in c.items() if k not in ("src", "fixed_words", "fixed_for")} for c in job["clips"]]
+    out["clips"] = [{k: v for k, v in c.items() if k not in ("src", "fixed_words", "fixed_for", "scene_for")} for c in job["clips"]]
+    out["has_source"] = bool(job.get("source_path") and Path(job["source_path"]).is_file())
+    out["lang_name"] = whisper_asr.name(job.get("lang")) if job.get("lang") else ""
     ai = job.get("ai") or {}
     out["ai"] = {"tokens": ai.get("tokens", 0), "note": ai.get("note", ""), "used": bool(ai.get("model"))}   # never the model, never raw errors
     if job.get("status") == "queued":
@@ -335,10 +358,68 @@ def delete(jid):
     return bool(job)
 
 
+CLIP_EDITS = {"hook": 60, "title": 100, "description": 2000}
+
+
+def _local_title(job, c):
+    """With no AI: words that were really said around the moment, never made-up ones."""
+    try:
+        words = json.loads((Path(job["dir"]) / "words.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        words = []
+    near = [w["w"] for w in words if c.get("peak", c["start"]) - 2.5 <= w["s"] < c.get("peak", c["start"]) + 2.5]
+    said = brain._text(" ".join(near), 200)
+    return (f"\u201c{said[:64].rsplit(' ', 1)[0] if len(said) > 64 else said}\u201d" if said else "Highlight",
+            " ".join(said.split()[:4]).upper() if said else "")
+
+
+def _clip_from(job, c, n) -> dict:
+    """A clip, from a ranked candidate: its times (a later start when the hook check found a slow opening and
+    the owner allows trimming), what the ranking said about it, and the look chosen for the video."""
+    o = job["options"]
+    if not c.get("hook"):
+        try:
+            lj = json.loads((Path(job["dir"]) / "loudness.json").read_text(encoding="utf-8"))
+            words = json.loads((Path(job["dir"]) / "words.json").read_text(encoding="utf-8"))
+            c["hook"] = highlights.hook(c, words, lj["db"], lj["from"], int(o["min_len"]))
+        except (OSError, ValueError, KeyError):
+            c["hook"] = {}
+    h, a = c.get("hook") or {}, c.get("ai") or {}
+    start = c["start"]
+    if o.get("hook_trim", True) and h.get("recommended_start") and not h.get("context_warning"):
+        start = h["recommended_start"]
+    cat = a.get("category") or "other"
+    title, said = _local_title(job, c) if not a.get("title") else (a["title"], "")
+    heads = dict(a.get("headlines") or {})
+    if not heads:                                    # no AI: the words that were said, in every language slot
+        heads = {"local": said or title.strip("\u201c\u201d")}
+    return {"id": f"clip{n:02d}", "from_candidate": c["id"], "start": round(start, 2), "end": round(c["end"], 2),
+            "original_start": round(c["start"], 2), "score": int(c.get("total", 0)), "scores": c.get("scores") or {},
+            "ranked_by": "ai" if a else "local", "category": cat, "category_label": highlights.CATEGORY_LABELS.get(cat, "Highlight"),
+            "hook": a.get("hook_text") or said, "title": title, "description": a.get("reason", ""),
+            "hashtags": ["gaming", "shorts", re.sub(r"\W", "", cat)], "highlight_words": a.get("highlight_words") or [],
+            "caption_ideas": a.get("captions") or [], "reason": a.get("reason") or "Picked by local signals: "
+            + ", ".join(f"{k} {v}" for k, v in (c.get("signals") or {}).items() if k in ("loud", "reactions", "laughs")),
+            "ending": a.get("ending", ""), "hook_analysis": h, "style": o.get("style", DEFAULTS["style"]),
+            "captions": o.get("captions"), "layout": compose.mode_of(o.get("layout")), "zoom": o.get("zoom", "none"),
+            "normalize": o.get("normalize", True), "quality": o.get("render_quality", "standard"),
+            "headlines": heads, "issues": a.get("issues") or [], "caption_lang": o.get("caption_lang", "original"),
+            "caption_order": o.get("caption_order", "hi_first"), "headline": None, "music": None,
+            "status": "queued", "version": 0, "rejected": False}
+
+
 def request_render(jid, cid, changes: dict):
+    """Re-make one clip with new times, look or layout. The AI is not asked again: the ranking, titles and the
+    tidied caption words already made for this clip are reused (only words that come into a longer clip are
+    tidied, and only if the AI is allowed)."""
     job = _jobs[jid]
     clip = next(c for c in job["clips"] if c["id"] == cid)
     new = dict(clip)
+    if changes.get("use_start") in ("original", "recommended"):
+        h = clip.get("hook_analysis") or {}
+        pick = h.get("original_start") if changes["use_start"] == "original" else h.get("recommended_start")
+        if pick is not None:
+            new["start"] = float(pick)
     for k in ("start", "end"):
         if k in changes:
             new[k] = round(float(changes[k]), 2)
@@ -347,52 +428,172 @@ def request_render(jid, cid, changes: dict):
         new["end"] = min(new["end"], clip["src_end"])
     if not (math.isfinite(new["start"]) and math.isfinite(new["end"])) or new["start"] < 0:
         raise ValueError("Those times aren't valid.")
+    if job.get("duration") and new["end"] > job["duration"] + 0.5 and "src_offset" not in clip:
+        raise ValueError("The end is past the end of the video.")
     if not 3 <= new["end"] - new["start"] <= 180:
         raise ValueError("A clip can be 3 to 180 seconds long.")
-    for k in ("hook", "title", "description", "style", "layout"):
+    for k, limit in CLIP_EDITS.items():
         if k in changes:
-            new[k] = str(changes[k])[:{"hook": 60, "title": 100, "description": 2000}.get(k, 20)]
+            new[k] = str(changes[k])[:limit]
+    if "style" in changes:
+        new["style"] = changes["style"] if changes["style"] in render.STYLES else DEFAULTS["style"]
+        new.pop("captions", None)                 # a new preset starts from that preset's own look
+    if "layout" in changes:
+        new["layout"] = compose.mode_of(changes["layout"])
+    if "captions" in changes:
+        new["captions"] = captions.clean(changes["captions"]) if changes["captions"] else None
+    if "manual" in changes:
+        m = changes["manual"] if isinstance(changes["manual"], dict) else {}
+        new["manual"] = {k: m[k] for k in ("face", "game", "split", "zoom", "order") if k in m}
+        new["layout"] = "manual"
+    if "zoom" in changes:
+        new["zoom"] = changes["zoom"] if changes["zoom"] in CHOICES["zoom"] else "none"
+    if "caption_lang" in changes:
+        new["caption_lang"] = changes["caption_lang"] if changes["caption_lang"] in subtitles.MODES else "original"
+    if "caption_order" in changes:
+        new["caption_order"] = "en_first" if changes["caption_order"] == "en_first" else "hi_first"
+    if "headline" in changes:
+        new["headline"] = {**(clip.get("headline") or {}), **headline.clean(changes["headline"] or {})}
+    if "music" in changes:
+        new["music"] = {**(clip.get("music") or {}), **music.clean(changes["music"] or {})}
+    if changes.get("retranslate"):                  # asked for in so many words: the translations are made again
+        subtitles.forget(job["dir"])
+    if "normalize" in changes:
+        new["normalize"] = bool(changes["normalize"])
+    if "quality" in changes:
+        new["quality"] = changes["quality"] if changes["quality"] in render.QUALITY else "standard"
     if new.get("style") not in render.STYLES:
         new["style"] = DEFAULTS["style"]
-    if new.get("layout") not in render.LAYOUTS:
-        new["layout"] = DEFAULTS["layout"]
-    clip.update(new, status="queued")
+    new["layout"] = compose.mode_of(new.get("layout"))
+    new["rejected"] = False
+    clip.update(new, status="queued", error=None)
     save(job)
     _q.put(("clip", jid, cid))
+
+
+def set_rejected(jid, cid, rejected: bool):
+    job = _jobs[jid]
+    clip = next(c for c in job["clips"] if c["id"] == cid)
+    clip["rejected"] = bool(rejected)
+    save(job)
+
+
+def add_candidate(jid, cand_id):
+    """Make a clip from one of the moments that was found but not picked. Uses what the ranking already said."""
+    job = _jobs[jid]
+    cand = next((c for c in job.get("candidates") or [] if c["id"] == cand_id), None)
+    if not cand:
+        raise ValueError("No such moment.")
+    if any(c.get("from_candidate") == cand_id for c in job["clips"]):
+        raise ValueError("That moment is already a clip.")
+    clip = _clip_from(job, cand, len(job["clips"]) + 1)
+    job["clips"].append(clip)
+    save(job)
+    _q.put(("clip", jid, clip["id"]))
+    return clip
+
+
+def _fixed_words(clip, words, job, off):
+    """The caption words for this clip. English is tidied by the AI once and reused (numbers as digits, names
+    spelled right); when the clip was moved or made longer, only the new words are tidied. Any other language is
+    kept exactly as it was spoken and written down: Hindi stays in Devanagari, Hinglish keeps its mix. Changing
+    the caption language never rewrites these words: a translation is kept apart from them (subtitles.py)."""
+    if subtitles.family(job.get("lang") or "en") != "en":
+        return [w for w in words if clip["start"] - 1 <= w["s"] <= clip["end"] + 1]
+    span = [round(clip["start"], 2), round(clip["end"], 2), "en2"]
+    have = clip.get("fixed_words") or []
+    old = clip.get("fixed_for") or []
+    if old == span and have and not any(roman.needs_roman(w.get("w", "")) for w in have):
+        return have
+    raw = [w for w in words if clip["start"] - 1 <= w["s"] <= clip["end"] + 1]
+    if have and len(old) == 3:
+        a, b = old[0] - 1, old[1] + 1
+        keep = [w for w in have if clip["start"] - 1 <= w["s"] <= clip["end"] + 1]
+        extra = [w for w in raw if not a <= w["s"] <= b]
+        if not extra:
+            clip.update(fixed_words=keep, fixed_for=span)
+            return keep
+        raw, keep_part = extra, keep
+    else:
+        keep_part = []
+    try:
+        usage.set_context(job.get("creator"), job.get("title") or "")
+        if not ai.allowed():
+            raise RuntimeError("AI off")
+        raw = brain.english_captions(raw, job.get("lang") or "", job.get("title") or "",
+                                     youtube_english=lambda: _english_part(job, clip))
+    except Exception:  # noqa: BLE001 - captions still render with the words as heard
+        raw = roman.words(raw)
+    got = sorted(keep_part + raw, key=lambda w: w["s"])
+    clip.update(fixed_words=got, fixed_for=span)
+    return got
+
+
+def _dress(job, clip, local, near):
+    """Captions in the chosen language, the headline and the music, for one render. Translations come from the
+    project's store (made once); a missing one is made now, or the spoken words are shown and the clip says so."""
+    d, o = Path(job["dir"]), job["options"]
+    src_lang = job.get("lang") or "en"
+    mode = clip.get("caption_lang") or o.get("caption_lang") or "original"
+    order = clip.get("caption_order") or o.get("caption_order") or "hi_first"
+    to = subtitles.needs_translation(src_lang, mode)
+    tr, note = {}, ""
+    if to:
+        texts = [ph["text"] for ph in subtitles.phrases(near)]
+        try:
+            usage.set_context(job.get("creator"), job.get("title") or "")
+            tr = subtitles.translate(d, texts, to, src_lang, job.get("title") or "")
+        except Exception as e:  # noqa: BLE001 - the spoken words are shown, and the reason is said
+            tr = subtitles.cached(d, texts, to)
+            note = f"Captions couldn't be translated ({safe.friendly(e, 160)}), so the spoken words are shown."
+    cd = subtitles.build(near, src_lang, mode, order, tr)
+    if to and cd["missing"] and not note:
+        note = f"{cd['missing']} caption line{'s' if cd['missing'] != 1 else ''} had no translation and show the spoken words."
+    clip["caption_note"] = note
+    local["caption_data"] = cd
+    # projects made before headlines and music existed keep looking the way they were made: the title box for the
+    # whole clip, and no music, unless the owner changes that on a clip
+    older = "headline_lang" not in o
+    hs = headline.resolve(clip.get("headline"), {**({"duration": 0} if older else {}),
+                                                 **({"lang": o["headline_lang"]} if o.get("headline_lang") else {}),
+                                                 **(o.get("headline") or {})})
+    local["headline_set"] = hs
+    local["headline_text"] = headline.text_for(clip, hs, src_lang)
+    clip["headline_shown"] = local["headline_text"] if hs.get("enabled") else ""
+    ms = music.resolve(clip.get("music"), {"enabled": False} if "music" not in o else o.get("music"))
+    t = music.pick(ms, clip.get("category"))
+    local["music_set"] = ms
+    local["music_path"] = str(music.folder() / t["file"]) if t else ""
+    clip["music_used"] = {"id": t["id"], "title": t["title"]} if t else None
 
 
 def render_one(job, clip, words):
     d = Path(job["dir"])
     clip["status"] = "rendering"
+    clip["error"] = None
     save(job)
     try:
         off = clip.get("src_offset", 0.0)
         src = Path(clip["src"]) if clip.get("src") else Path(job["source_path"])
         if not clip.get("src"):
             clip["end"] = min(clip["end"], job["duration"])
-        local = dict(clip, start=clip["start"] - off, end=clip["end"] - off, hook=roman.to_roman(clip.get("hook") or ""))
-        span = [round(clip["start"], 2), round(clip["end"], 2), "en2"]      # "en2": captions made always-English
-        if clip.get("fixed_for") == span and clip.get("fixed_words") and not any(
-                roman.needs_roman(w.get("w", "")) for w in clip["fixed_words"]):
-            raw = clip["fixed_words"]          # already tidied for this exact span: no second AI call
+        raw = _fixed_words(clip, words, job, off)
+        near = [dict(w, s=w["s"] - off, e=w["e"] - off) for w in raw]
+        local = dict(clip, start=clip["start"] - off, end=clip["end"] - off)
+        _dress(job, clip, local, near)
+        if clip.get("src"):                       # a piece fetched for this clip: its own size
+            info = media.probe(src)
+            w, h = info["width"], info["height"]
         else:
-            raw = [w for w in words if clip["start"] - 1 <= w["s"] <= clip["end"] + 1]
-            try:
-                usage.set_context(job.get("creator"), job.get("title") or "")
-                raw = brain.english_captions(raw, job.get("lang") or "", job.get("title") or "",
-                                             youtube_english=lambda: _english_part(job, clip))
-                clip.update(fixed_words=raw, fixed_for=span)
-            except Exception:  # noqa: BLE001 - captions still render with the words as heard
-                pass
-        # the last word on it: whatever was said, nothing is drawn in Hindi or Urdu script
-        near = [dict(w, s=w["s"] - off, e=w["e"] - off) for w in roman.words(raw)]
-        out = render.render_clip(src, d / "clips", clip["id"], local, near, job["width"], job["height"])
+            w, h = job["width"], job["height"]
+        local["scene"] = clip["scene"] = _scene(job, clip, src, local["start"], local["end"], w, h)
+        out = render.render_clip(src, d / "clips", clip["id"], local, near, w, h)
         clip.update(out, status="done", version=clip.get("version", 0) + 1, error=None)
-        post = {k: clip[k] for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
+        post = {k: clip.get(k) for k in ("title", "description", "hashtags", "hook", "start", "end", "score")}
         (d / "clips" / f"{clip['id']}.json").write_text(json.dumps(post, indent=1), encoding="utf-8")
         if clip["version"] == 1:
             clip.setdefault("made_at", time.time())
-            creators.log(job["creator"], f"Clip ready (score {clip['score']}): {clip['title'] or clip['hook']}")
+            creators.log(job["creator"], f"Clip ready (score {clip.get('score', 0)}): {clip.get('title') or clip.get('hook')}")
             save(job)
             for fn in on_clip_ready:
                 try:
@@ -403,6 +604,29 @@ def render_one(job, clip, words):
         clip.update(status="error", error=safe.friendly(e, 400))
         creators.log(job["creator"], f"Clip failed: {safe.friendly(e, 200)}")
     save(job)
+
+
+_facecam_lock = threading.Lock()
+
+
+def _scene(job, clip, src, start, end, w, h) -> dict:
+    """What the layout needs to know about this clip (face, facecam, action), looked at once and kept. The facecam
+    is searched for across the whole video once per video; a piece fetched for one clip is searched on its own."""
+    key = [round(start, 2), round(end, 2), str(src.name)]
+    if clip.get("scene") and clip.get("scene_for") == key:
+        return clip["scene"]
+    if clip.get("src"):
+        fc = face.find_facecam(src, media.probe(src)["duration"], w, h, samples=12)
+    else:
+        with _facecam_lock:
+            if not job.get("facecam") or job.get("facecam_for") != str(src.name):
+                job["facecam"] = face.find_facecam(src, job.get("duration") or end, w, h)
+                job["facecam_for"] = str(src.name)
+                save(job)
+        fc = job["facecam"]
+    sc = face.analyse(src, start, end, w, h, fc)
+    clip["scene_for"] = key
+    return sc
 
 
 CLIP_MINUTES = float(config.env("PEAKCUT_CLIP_MINUTES", "15"))     # the longest one clip may take to make
@@ -487,8 +711,37 @@ def _covers(words: list, start: float, end: float) -> bool:
     return len(inside) >= 25 * minutes and inside[-1]["s"] >= start + 0.85 * (end - start)
 
 
+def _language(job, o, yt, audio) -> dict:
+    """The language of the video, and so which engine writes it down (see whisper_asr.classify)."""
+    if o.get("language") and o["language"] != "auto":
+        return whisper_asr.for_override(o["language"])
+    if yt:
+        code = (yt[1] or "").lower()
+        if code.startswith("en"):
+            return {"lang": "en", "whisper_lang": "en", "probability": 1.0, "engine": "parakeet", "probs": {}, "from": "youtube"}
+        base = code.split("-")[0]
+        return {"lang": base, "whisper_lang": base, "probability": 1.0, "engine": "whisper", "probs": {}, "from": "youtube"}
+    if not whisper_asr.available():
+        return {"lang": "en", "whisper_lang": "en", "probability": 0.0, "engine": "parakeet", "probs": {},
+                "note": "The multilingual speech engine isn't installed, so the video was taken to be English."}
+    _set(job, phase="transcribing", stage="Listening for the language" if whisper_asr.ready() else
+         "Getting the multilingual speech model (one time, about 1.6 GB)")
+    try:
+        return whisper_asr.detect(audio)
+    except Exception as e:  # noqa: BLE001 - said on the video; English is assumed
+        return {"lang": "en", "whisper_lang": "en", "probability": 0.0, "engine": "parakeet", "probs": {},
+                "note": f"The language couldn't be detected ({safe.friendly(e, 160)}), so the video was taken to be English. "
+                        "Choose the language under More options and make it again if that is wrong."}
+
+
+def _download_message(e) -> str:
+    if isinstance(e, media.YouTubeBlocked):
+        return str(e)
+    why = safe.friendly(e, 300).replace("ERROR: ", "").strip()
+    return media.UPLOAD_INSTEAD + (f" ({why[-220:]})" if why else "")
+
+
 def _run_job(job):
-    import math
     from concurrent.futures import ThreadPoolExecutor
     d = Path(job["dir"])
     o = job["options"]
@@ -500,16 +753,20 @@ def _run_job(job):
     if resuming:   # after a restart: keep the transcript parts, clips and AI answers already made, and carry on
         _set(job, status="running", stage="Picking up where it stopped", error=None)
     else:
-        _set(job, status="running", stage="Getting the audio", progress=0.03, error=None, clips=[], ai={}, done_blocks=0)
+        _set(job, status="running", phase="importing", stage="Importing the video", progress=0.03, error=None, clips=[], ai={},
+             done_blocks=0, candidates=[], selection={})
     if not transcribe.model_ready() and not transcribe.REMOTE:
         from . import fetch_model
         _set(job, stage="Getting the speech model (one time, about 480 MB)")
         fetch_model.ensure()
-        _set(job, stage="Getting the audio")
+        _set(job, stage="Importing the video")
     fetch = ThreadPoolExecutor(1)
     video = None
     if src["type"] == "url":
-        meta = media.info(src["url"])
+        try:
+            meta = media.info(src["url"])
+        except Exception as e:  # noqa: BLE001 - said plainly, with the way out: upload the file instead
+            raise media.DownloadFailed(_download_message(e)) from None
         if meta["kind"] != "video":
             raise RuntimeError("That link is a channel or playlist, not a single video. Paste the link of one video.")
         if ((o["range_end"] or meta["duration"]) - (o["range_start"] or 0)) > config.MAX_VIDEO_HOURS * 3600:
@@ -525,7 +782,10 @@ def _run_job(job):
         pieces = span > LONG_VIDEO or meta["duration"] <= 0
         if not pieces:  # shorter video: fetch all of it in the background while the audio is worked on
             video = fetch.submit(media.download, src["url"], d, int(o["quality"]))
-        audio_file = media.download_audio(src["url"], d, lambda p: _set(job, progress=0.03 + 0.1 * p))
+        try:
+            audio_file = media.download_audio(src["url"], d, lambda p: _set(job, progress=0.03 + 0.1 * p))
+        except Exception as e:  # noqa: BLE001
+            raise media.DownloadFailed(_download_message(e)) from None
     else:
         pieces, audio_file = False, Path(src["path"])
         info = media.probe(audio_file)
@@ -576,7 +836,7 @@ def _run_job(job):
         began[clip["id"]] = time.time()
         if src["type"] == "url" and (pieces or not whole_video()):
             _fetch_piece(job, clip, audio)
-        if clip["status"] != "error" and yt and yt[1].lower().startswith("en"):
+        if clip["status"] != "error" and yt and yt[1].lower().startswith("en") and li["engine"] == "parakeet":
             # The clip was found with YouTube's transcript. What is shown on screen comes from our own model,
             # run on just this clip: full punctuation, nothing blanked out, timings to the word.
             a0, b0 = max(lo, int((clip["start"] - 1.5) * 16000)), min(hi, int((clip["end"] + 1.5) * 16000))
@@ -606,7 +866,14 @@ def _run_job(job):
         if yt and not _covers(yt[0], lo / 16000, hi / 16000):
             yt = None
         job["transcript_from"] = "youtube" if yt else "own"
-        job["lang"] = yt[1] if yt else ""          # the language spoken, when YouTube says (decides the captions)
+    # ---- which language is spoken: the owner's choice, else what YouTube says, else a listen to the audio itself
+    if not (resuming and job.get("lang_info")):
+        job["lang_info"] = _language(job, o, yt, audio[lo:hi])
+    li = job["lang_info"]
+    job["lang"] = li["lang"]
+    asr_lang = "" if li["engine"] == "parakeet" else li["whisper_lang"]
+    lang_note = "" if li["lang"] == "en" else f" ({whisper_asr.name(li['lang'])})"
+    save(job)
     if resuming:
         try:
             words = json.loads((d / "words.json").read_text(encoding="utf-8"))
@@ -636,49 +903,69 @@ def _run_job(job):
                 if now_on[0] == i and p - last[0] > 0.05:      # only the part being shown moves the bar
                     last[0] = p
                     _set(job, progress=max(job["progress"], 0.14 + 0.78 * ((a_ - lo) + p * (b_ - a_)) / max(1, hi - lo)))
-            heard[i] = ahead.submit(ctx.bind(transcribe.transcribe), audio[a_:b_], tp)
+            heard[i] = ahead.submit(ctx.bind(transcribe.transcribe), audio[a_:b_], tp, asr_lang)
 
     for bi, (a, b) in enumerate(blocks):
         if bi < done_blocks:
-            continue                      # transcribed and checked by the AI before the restart
+            continue                      # transcribed before the restart
         shift = a / 16000
         where = f" (minute {round((a - lo) / 16000 / 60)} of {round(span / 60)})" if len(blocks) > 1 else ""
         if yt:
-            _set(job, stage="Reading the transcript" + where)
+            _set(job, phase="transcribing", stage="Reading the transcript" + where)
             bw = [dict(w, s=round(w["s"] - shift, 2), e=round(w["e"] - shift, 2)) for w in yt[0] if a / 16000 <= w["s"] < b / 16000]
         else:
-            _set(job, stage="Writing the transcript" + where)
+            _set(job, phase="transcribing", stage="Transcribing on this Mac" + lang_note + where)
             now_on[0] = bi
             hear(bi)
             hear(bi + 1)
+            hear(bi + 2)
             bw = heard.pop(bi).result()
         _set(job, progress=max(job["progress"], 0.14 + 0.78 * (b - lo) / max(1, hi - lo)))
         words += [dict(w, s=round(w["s"] + shift, 2), e=round(w["e"] + shift, 2)) for w in bw]
         (d / "words.json").write_text(json.dumps(words), encoding="utf-8")
-        _set(job, stage="Finding the best moments" + where, word_count=len(words))
-        left = int(o["max_clips"]) - len(job["clips"])
-        if left <= 0 or len(bw) < 8:
-            job["done_blocks"] = bi + 1
-            save(job)
-            continue
-        quota = max(1, math.ceil(left / (len(blocks) - bi)))
-        s0 = int((a - lo) / 16000)
-        found, ai = brain.find_clips(bw, db[s0: s0 + int((b - a) / 16000) + 1], (b - a) / 16000, job["title"],
-                                     job["uploader"], quota, int(o["min_len"]), int(o["max_len"]), notes.append)
-        tokens += ai.get("tokens", 0)
-        model = ai.get("model") or model
-        if ai.get("note"):
-            notes.append(ai["note"])
-        for c in found:
-            c.update(id=f"clip{len(job['clips']) + 1:02d}", start=round(c["start"] + shift, 2),
-                     end=round(c["end"] + shift, 2), style=o["style"], layout=o["layout"], status="queued", version=0)
-            job["clips"].append(c)
-            futures.append((renders.submit(ctx.bind(make), c, list(words)), c))
-        job["ai"] = {"model": model, "tokens": tokens, "note": "", "log": notes[-5:]}
         job["done_blocks"] = bi + 1       # a restart from here on carries on with the next part
+        _set(job, word_count=len(words))
+    lo_s, hi_s = lo / 16000, hi / 16000
+    (d / "loudness.json").write_text(json.dumps({"from": lo_s, "db": [round(float(x), 2) for x in db]}), encoding="utf-8")
+    if not job["clips"]:                  # (a restart after the clips were chosen keeps them: no second AI call)
+        _set(job, phase="analysing", stage="Analysing the moments", progress=max(job["progress"], 0.9))
+        rel = [dict(w, s=w["s"] - lo_s, e=w["e"] - lo_s) for w in words if lo_s <= w["s"] < hi_s]
+        cands = highlights.candidates(rel, db, hi_s, int(o["min_len"]), int(o["max_len"]), int(o["candidates"]), lo=lo_s)
+        _set(job, phase="selecting", stage=f"Selecting highlights from {len(cands)} moments")
+        cands, rk = highlights.rank(cands, words, job["title"], job["uploader"], int(o["max_clips"]), o["rank_mode"], notes.append,
+                                    lang=job.get("lang") or "en")
+        tokens += rk.get("tokens", 0)
+        model = rk.get("model") or model
+        picked, why_fewer = highlights.select(cands, int(o["max_clips"]), o["rank_mode"], rk["ranked_by"])
+        for c in picked:
+            c["hook"] = highlights.hook(c, words, db, lo_s, int(o["min_len"]))
+        chosen = {c["id"] for c in picked}
+        job["candidates"] = [{k: v for k, v in c.items()} | {"picked": c["id"] in chosen} for c in cands]
+        job["selection"] = {"ranked_by": rk["ranked_by"], "cached": rk.get("cached", False), "note": rk.get("note", ""),
+                            "fewer": why_fewer, "asked": int(o["max_clips"]), "found": len(cands), "mode": o["rank_mode"]}
+        for c in picked:
+            job["clips"].append(_clip_from(job, c, len(job["clips"]) + 1))
+        job["ai"] = {"model": model, "tokens": tokens, "note": rk.get("note", ""), "log": notes[-5:],
+                     "ranked_by": rk["ranked_by"], "cached": rk.get("cached", False)}
+        to = subtitles.needs_translation(job.get("lang") or "en", o.get("caption_lang", "original"))
+        if to and job["clips"]:
+            _set(job, stage="Translating the captions")
+            texts = [ph["text"] for c in job["clips"]
+                     for ph in subtitles.phrases([w for w in words if c["start"] - 1 <= w["s"] <= c["end"] + 1])]
+            try:
+                subtitles.translate(d, texts, to, job.get("lang") or "", job["title"])
+            except Exception as e:  # noqa: BLE001 - each clip then says its captions show the spoken words
+                notes.append(f"Captions could not be translated: {safe.friendly(e, 200)}")
+        save(job)
+        for c in job["clips"]:
+            if o.get("auto_render", True):
+                futures.append((renders.submit(ctx.bind(make), c, list(words)), c))
+            else:
+                c["status"] = "pending"   # waits for the owner to look at it and press Render
         save(job)
     if futures:
-        _set(job, stage="Finishing the clips", progress=max(job["progress"], 0.92))
+        _set(job, phase="rendering", stage=f"Rendering {len(futures)} clip{'s' if len(futures) != 1 else ''}",
+             progress=max(job["progress"], 0.92))
     _wait_for_clips(job, futures, began, renders._max_workers)
     if exact:           # keep our own words for the clips in the saved transcript, so editing a clip later uses them
         for a_s, b_s, tw in exact.values():
@@ -690,15 +977,16 @@ def _run_job(job):
     fetch.shutdown(wait=False)
     del audio
     clips = job["clips"]
-    job["ai"] = {"model": model, "tokens": tokens, "log": notes[-5:],
-                 "note": "The AI was unavailable, so clips were picked by loudness only." if clips and not model else ""}
-    stage = "Done" if clips else "Done, but nothing clip-worthy was found"
-    _set(job, status="done", stage=stage, progress=1.0, took=round(time.time() - t0))
+    failed = sum(1 for c in clips if c.get("status") == "error")
+    stage = ("Review ready" if clips and not failed else
+             f"Review ready: {failed} of {len(clips)} clips failed to render" if clips else
+             "Done, but nothing clip-worthy was found")
+    _set(job, status="done", phase="ready", stage=stage, progress=1.0, took=round(time.time() - t0))
     try:
         from . import notices
         name = job.get("title") or job["source"].get("name") or "your video"
         notices.add(job.get("user"), "clips", f"{len(clips)} clip{'s' if len(clips) != 1 else ''} ready" if clips else "Nothing clip-worthy found",
-                    name, f"/app/creators/{job['creator']}" if job.get("creator") else "/app/videos")
+                    name, f"/classic/creators/{job['creator']}" if job.get("creator") else "/app/videos")
     except Exception:  # noqa: BLE001
         pass
     creators.log(job["creator"], f"Video finished with {len(clips)} clips in {round(time.time() - t0)}s: {job['title']}")
@@ -732,7 +1020,8 @@ def _worker(quick_only=False):
                 for c in job["clips"]:
                     if c.get("status") in ("queued", "rendering"):
                         c.update(status="error", error="The video stopped before this clip was made.")
-                _set(job, status="error", error=safe.friendly(e), stage="Stopped")
+                _set(job, status="error", error=safe.friendly(e), stage="Stopped",
+                     upload_instead=isinstance(e, media.DownloadFailed))
                 creators.log(job["creator"], f"Video failed: {safe.friendly(e)[:200]}")
         finally:
             ctx._uid.reset(token)
