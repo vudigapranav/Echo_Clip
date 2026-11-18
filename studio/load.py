@@ -5,6 +5,7 @@ room, waits in line for a moment when it is nearly full, and is let through the 
 what keeps a rush from slowing everyone down or crashing the server."""
 import os
 import shutil
+import sys
 import threading
 import time
 
@@ -20,6 +21,20 @@ _started = False
 _lock = threading.Lock()
 
 
+_mach = {}
+
+
+def _mac_host():
+    """The Mac's own counters (the same ones Activity Monitor reads): there is no /proc on macOS."""
+    if not _mach:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library("c"))
+        libc.mach_host_self.restype = ctypes.c_uint
+        _mach.update(libc=libc, host=libc.mach_host_self(), ctypes=ctypes)
+    return _mach["libc"], _mach["host"], _mach["ctypes"]
+
+
 def _cpu_times():
     """(busy, total) processor time so far, in any unit."""
     if os.name == "nt":
@@ -30,6 +45,12 @@ def _cpu_times():
         n = lambda f: (f.dwHighDateTime << 32) | f.dwLowDateTime          # noqa: E731
         total = n(kernel) + n(user)                                        # kernel time includes idle time
         return total - n(idle), total
+    if sys.platform == "darwin":
+        libc, host, ctypes = _mac_host()
+        ticks, count = (ctypes.c_uint * 4)(), ctypes.c_uint(4)             # user, system, idle, nice
+        if libc.host_statistics(host, 3, ticks, ctypes.byref(count)) != 0:
+            raise OSError("host_statistics failed")
+        return ticks[0] + ticks[1] + ticks[3], sum(ticks)
     with open("/proc/stat", encoding="ascii") as f:
         v = [int(x) for x in f.readline().split()[1:9]]
     return sum(v) - v[3] - v[4], sum(v)                                    # everything except idle and waiting on disk
@@ -46,6 +67,13 @@ def _ram_free_gb() -> float:
         m.dwLength = ctypes.sizeof(M)
         ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
         return m.avail / 1e9
+    if sys.platform == "darwin":
+        libc, host, ctypes = _mac_host()
+        vm, count = (ctypes.c_uint * 64)(), ctypes.c_uint(64)
+        if libc.host_statistics64(host, 4, vm, ctypes.byref(count)) != 0:
+            return 99.0
+        # free + inactive pages: what macOS can hand to a program without pushing anything out
+        return (vm[0] + vm[2]) * os.sysconf("SC_PAGE_SIZE") / 1e9
     with open("/proc/meminfo", encoding="ascii") as f:
         for line in f:
             if line.startswith("MemAvailable:"):
@@ -56,18 +84,22 @@ def _ram_free_gb() -> float:
 def _watch():
     try:
         last = _cpu_times()
-    except Exception:  # noqa: BLE001 - a system we cannot measure: behave as if there is always room
-        return
+    except Exception:  # noqa: BLE001 - a processor we cannot measure: behave as if it always has room
+        last = None
     while True:
         time.sleep(1)
         try:
-            now = _cpu_times()
-            used, total = now[0] - last[0], now[1] - last[1]
-            last = now
-            if total > 0:
-                # smoothed over a few seconds, so one short spike neither holds people up nor lets too much in
-                _state["cpu"] = 0.55 * _state["cpu"] + 0.45 * (100.0 * used / total)
-            _state["ram_free"] = _ram_free_gb()
+            if last is not None:
+                now = _cpu_times()
+                used, total = now[0] - last[0], now[1] - last[1]
+                last = now
+                if total > 0:
+                    # smoothed over a few seconds, so one short spike neither holds people up nor lets too much in
+                    _state["cpu"] = 0.55 * _state["cpu"] + 0.45 * (100.0 * used / total)
+                _state["ram_free"] = _ram_free_gb()
+        except Exception:  # noqa: BLE001
+            pass
+        try:                          # the drive is looked at whatever else can or cannot be measured
             if time.time() - _state["at"] > 15:
                 _state["disk_free"] = shutil.disk_usage(config.DATA_DIR).free / 1e9
                 _state["at"] = time.time()

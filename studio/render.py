@@ -1,17 +1,22 @@
-"""Turns a time range into a vertical clip: 9:16 layout, bouncy word captions, hook title, cover."""
+"""Turns a time range into a vertical clip: 9:16 layout, word-by-word captions, hook title, cover.
+
+Captions are drawn by Echo Clip itself (captions.py, with Pillow) and laid over the video while ffmpeg encodes it,
+so every ffmpeg works, including builds without the subtitle library (Homebrew's ffmpeg has none). build_ass()
+below is the older way of describing the same captions for ffmpeg's subtitle filter; it is kept for reference and
+its tests, and is not used to render."""
 import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-from . import config, roman
+from . import captions, compose, config, roman
 from .media import NO_WINDOW, run
 
 W, H = config.OUT_W, config.OUT_H
 
 # ASS colours are &HBBGGRR. `size` is the ASS font size (line height); _Font turns it into real pixels.
-STYLES = {
+ASS_STYLES = {
     "bounce": {"label": "Bounce", "font": "Poppins ExtraBold", "size": 132, "base": "FFFFFF", "active": "00F0FF",
                "strong": "FFFFFF", "outline": 7, "pop": 112, "upper": True, "per": 3},
     "hype": {"label": "Hype", "font": "Anton", "size": 152, "base": "FFFFFF", "active": "3C3CFF",
@@ -78,7 +83,9 @@ def install_fonts():
             shutil.copyfile(f, config.FONTS_DIR / f.name)
 
 
-LAYOUTS = {"blur": "Full frame + blurred fill", "zoom": "Zoomed in + blurred fill", "crop": "Fill the screen (centre crop)"}
+LAYOUTS = compose.MODES
+# the caption looks the page offers (captions.PRESETS); a clip's "style" is one of these names
+STYLES = {k: {"label": v["label"]} for k, v in captions.PRESETS.items()}
 
 
 def _ts(t):
@@ -106,22 +113,6 @@ def _groups(words, per):
     if cur:
         out.append(cur)
     return out
-
-
-def geometry(src_w, src_h, layout):
-    """Where the video sits in the 1080x1920 frame, and where hook and captions go."""
-    if src_h >= src_w and layout != "crop":
-        layout = "crop"  # already vertical or square: nothing to gain from a blurred fill
-    if layout == "blur":
-        fg_h = min(H, int(round(W * src_h / src_w / 2)) * 2)
-    elif layout == "zoom":
-        fg_h = 1000
-    else:
-        fg_h = H
-    top = (H - fg_h) // 2
-    if layout == "crop":
-        return layout, fg_h, 300, 1380
-    return layout, fg_h, max(230, top - 190), min(1640, top + fg_h + 180)
 
 
 def _hook_events(hook, dur, y):
@@ -156,7 +147,7 @@ def _hook_events(hook, dur, y):
 
 
 def build_ass(words, start, end, hook, style_name, highlight, hook_y, cap_y) -> str:
-    st = STYLES.get(style_name, STYLES["bounce"])
+    st = ASS_STYLES.get(style_name, ASS_STYLES["bounce"])
     words = [dict(w, s=w["s"] - CAPTION_LEAD, e=w["e"] - CAPTION_LEAD) for w in words]
     strong = {_key(h) for h in highlight if _key(h)}
     head = f"""[Script Info]
@@ -227,68 +218,196 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return head + "\n".join(ev) + "\n"
 
 
-def _filter(layout, fg_h):
-    if layout == "crop":
-        return f"[0:v]fps={config.OUT_FPS},scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1[v0];"
-    return (f"[0:v]fps={config.OUT_FPS},split=2[a][b];"
-            f"[a]scale=270:480:force_original_aspect_ratio=increase,crop=270:480,boxblur=6:2,"
-            f"scale={W}:{H},eq=brightness=-0.14:saturation=1.15[bg];"
-            f"[b]scale={W}:{fg_h}:force_original_aspect_ratio=increase,crop={W}:{fg_h}[fg];"
-            f"[bg][fg]overlay=0:(H-h)/2,setsar=1[v0];")
 
 
-_qsv_ok = None
-RENDER_SECONDS = 600      # one clip's video encode; far beyond normal, so a frozen encoder is stopped, not waited on
+# ================================================================ rendering
+RENDER_SECONDS = 900      # one clip's encode; far beyond normal, so a frozen encoder is stopped, not waited on
+QUALITY = {"high": ("18", "medium"), "standard": ("21", "veryfast"), "draft": ("25", "ultrafast")}
+
+
+def work_root() -> Path:
+    """Where clips are made before being moved into place: inside Echo Clip's own folder, so a render that was cut
+    off (Echo Clip closed half way) is cleared at the next start instead of piling up in the system's temp."""
+    d = config.TMP_DIR / "render"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def clear_leftovers():
+    for d in work_root().glob("ec*"):
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def caption_style(clip) -> dict:
+    """The caption settings for a clip: its own changes (`captions`) on top of its preset (`style`)."""
+    own = clip.get("captions") if isinstance(clip.get("captions"), dict) else {}
+    return captions.resolve({"preset": own.get("preset") or clip.get("style") or captions.DEFAULT, **own})
+
+
+def layout_plan(clip, src_w, src_h) -> dict:
+    return compose.plan(clip.get("layout", "auto"), src_w, src_h, clip.get("scene"), clip.get("manual"))
 
 
 def render_clip(src: Path, out_dir: Path, name: str, clip: dict, words: list, src_w: int, src_h: int) -> dict:
-    """Writes <name>.mp4, <name>.jpg and <name>.ass into out_dir. Returns file names."""
+    """Writes <name>.mp4 and <name>.jpg into out_dir. `clip` has start and end (seconds in `src`), layout, style,
+    highlight_words, and optionally: scene (face.analyse), manual, captions, zoom, normalize, quality;
+    caption_data (subtitles.build: word-by-word, translated or bilingual captions; without it the words are used);
+    headline_text and headline_set (headline.resolve); music_path and music_set (music.resolve).
+    Returns the file names and the layout that was used. Raises with a readable message if anything fails:
+    a clip is never written without the captions it was asked to have."""
+    from . import headline as hl
     out_dir.mkdir(parents=True, exist_ok=True)
-    start, end = clip["start"], clip["end"]
-    layout, fg_h, hook_y, cap_y = geometry(src_w, src_h, clip.get("layout", "blur"))
-    ass = build_ass(words, start, end, clip.get("hook", ""), clip.get("style", "bounce"),
-                    clip.get("highlight_words", []), hook_y, cap_y)
-    # The clip is made in a short work folder and moved into place afterwards. The caption step of ffmpeg cannot
-    # open files whose full path is longer than 260 characters on Windows, which a data folder deep inside other
-    # folders easily reaches. Inside the work folder every name is short and relative (a drive colon would also
-    # break the filter syntax).
-    work = Path(tempfile.mkdtemp(prefix="pk"))
+    start, end = float(clip["start"]), float(clip["end"])
+    dur = end - start
+    if dur < 1:
+        raise RuntimeError("This clip is shorter than a second, so there is nothing to render.")
+    p = layout_plan(clip, src_w, src_h)
+    st = caption_style(clip)
+    fps = config.OUT_FPS
+    # The clip is made in a short work folder (short, plain names: paths with spaces or colons never reach
+    # ffmpeg's filter syntax) and moved into place afterwards.
+    work = Path(tempfile.mkdtemp(prefix="ec", dir=work_root()))
     try:
-        return _render_in(work, src, out_dir, name, start, end, layout, fg_h, ass)
+        track = None
+        if st["enabled"]:
+            cd = clip.get("caption_data") or {"kind": "words", "words": words}
+            y = captions.cap_y(st, p["cap_y"])
+            hi = clip.get("highlight_words") or []
+            if cd["kind"] == "phrases" and cd.get("phrases"):
+                track = captions.PhraseTrack(cd["phrases"], start, end, st, hi, y, fps)
+            else:
+                near = [w for w in cd.get("words") or [] if start - 0.05 <= w["s"] < end]
+                track = captions.Track(near, start, end, st, hi, y, fps)
+        head = None
+        hs = clip.get("headline_set") or {**hl.BASE, "enabled": st["hook"]}
+        text = clip.get("headline_text") if clip.get("headline_text") is not None else roman.to_roman(clip.get("hook") or "")
+        if hs.get("enabled") and st["hook"] and text:
+            got = captions.headline_image(text, 0, hs.get("style", "box"))
+            if got:
+                img, _ = got
+                cap_top, cap_bot = (track.y0, track.y0 + track.height) if track else (-10 ** 4, -10 ** 4)
+                mid = hl.place(hs.get("position", "auto"), p["hook_y"], cap_top, cap_bot, img.height)
+                head = (img, int(max(0, min(H - img.height, mid - img.height / 2))), hs)
+        _encode(work, src, start, dur, p, track, head, clip)
+        cover_t = min(max(1.2, min(float(hs.get("duration") or 0), 3.0) * 0.6) if head else 1.2, dur / 2)
+        run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", "out.mp4", "-frames:v", "1",
+             "-q:v", "3", "cover.jpg"], cwd=work)
+        shutil.move(str(work / "out.mp4"), str(out_dir / f"{name}.mp4"))
+        shutil.move(str(work / "cover.jpg"), str(out_dir / f"{name}.jpg"))
+        (out_dir / f"{name}.ass").unlink(missing_ok=True)       # left by the older renderer
     finally:
         shutil.rmtree(work, ignore_errors=True)
+    return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout_used": p["used"],
+            "caption_label": st["label"]}
 
 
-def _render_in(work: Path, src: Path, out_dir: Path, name: str, start, end, layout, fg_h, ass: str) -> dict:
-    global _qsv_ok
-    (work / f"{name}.ass").write_text(ass, encoding="utf-8")
-    (work / "f").mkdir()
-    for f in config.FONTS_DIR.glob("*.ttf"):
-        shutil.copyfile(f, work / "f" / f.name)
-    fc = _filter(layout, fg_h) + f"[v0]ass={name}.ass:fontsdir=f[v]"
-    base = ["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.2f}", "-t", f"{end - start:.2f}", "-i", str(src),
-            "-filter_complex", fc, "-map", "[v]", "-map", "0:a:0", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", "-pix_fmt"]
-    encoders = []
-    if _qsv_ok is not False:
-        encoders.append(("qsv", ["nv12", "-c:v", "h264_qsv", "-global_quality", "23", "-preset", "fast"]))
-    encoders.append(("x264", ["yuv420p", "-c:v", "libx264", "-crf", "21", "-preset", "veryfast"]))
-    err = None
-    for label, enc in encoders:
-        p = subprocess.run(base + enc + [f"{name}.mp4"], cwd=work, capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", creationflags=NO_WINDOW, timeout=RENDER_SECONDS)
-        if p.returncode == 0:
-            if label == "qsv":
-                _qsv_ok = True
-            break
-        err = p.stderr[-1200:]
-        if label == "qsv":
-            _qsv_ok = False
-    else:
-        raise RuntimeError(f"Render failed: {err}")
-    cover_t = min(1.2, (end - start) / 2)
-    run(["ffmpeg", "-y", "-v", "error", "-ss", f"{cover_t:.2f}", "-i", f"{name}.mp4", "-frames:v", "1",
-         "-q:v", "3", f"{name}.jpg"], cwd=work)
-    for ext in ("mp4", "jpg", "ass"):
-        shutil.move(str(work / f"{name}.{ext}"), str(out_dir / f"{name}.{ext}"))
-    return {"file": f"{name}.mp4", "cover": f"{name}.jpg", "layout": layout}
+def _headline_filter(n, last, img, top, hs, dur):
+    """The headline overlay: shown from the start for its duration (0 = the whole clip), with its animation."""
+    show = float(hs.get("duration") or 0)
+    show = dur if show <= 0 or show >= dur else show
+    anim = hs.get("anim", "pop")
+    h0 = img.height // 2 * 2
+    f = f"[{n}:v]format=rgba"
+    if anim in ("pop", "scale"):
+        a, s0 = (0.2, 0.55) if anim == "pop" else (0.45, 0.85)
+        f += (f",scale=w='trunc({W}*min(1\\,{s0}+{1 - s0}*sin(min(t/{a}\\,1)*PI/2))/2)*2':h=-2:eval=frame"
+              f",pad=w={W}:h={h0}:x='(ow-iw)/2':y='(oh-ih)/2':color=black@0:eval=frame")
+    if anim != "static":
+        f += ",fade=t=in:st=0:d=0.18:alpha=1"
+    if show < dur:
+        f += f",fade=t=out:st={max(0.0, show - 0.3):.2f}:d=0.3:alpha=1"
+    return f + f"[hk];[{last}][hk]overlay=0:{top}:eof_action=pass[vh]", show
+
+
+def _encode(work: Path, src: Path, start: float, dur: float, p: dict, track, head, clip: dict):
+    from . import music as mus
+    fps = config.OUT_FPS
+    crf, preset = QUALITY.get(clip.get("quality") or "standard", QUALITY["standard"])
+    cmd = ["ffmpeg", "-y", "-v", "error", "-hide_banner",
+           "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", str(Path(src).resolve())]
+    fc = compose.graph(p, fps, clip.get("zoom") or "none", dur)
+    last, n = "v0", 1
+    if track is not None:
+        cmd += ["-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{W}x{track.height}", "-r", str(fps), "-i", "pipe:0"]
+        fc += f";[{n}:v]format=rgba[cap];[{last}][cap]overlay=0:{track.y0}:eof_action=pass:format=auto[vc]"
+        last, n = "vc", n + 1
+    if head is not None:
+        img, top, hs = head
+        img.crop((0, 0, W, img.height // 2 * 2)).save(work / "head.png")
+        part, show = _headline_filter(n, last, img, top, hs, dur)
+        cmd += ["-loop", "1", "-framerate", str(fps), "-t", f"{show:.3f}", "-i", "head.png"]
+        fc += ";" + part
+        last, n = "vh", n + 1
+    fc += f";[{last}]format=yuv420p[v]"
+    ms = clip.get("music_set") or {**mus.BASE, "enabled": False}
+    has_music = bool(clip.get("music_path")) and Path(clip["music_path"]).is_file() and ms.get("enabled")
+    if has_music:
+        cmd += ["-stream_loop", "-1", "-i", str(Path(clip["music_path"]).resolve())]
+    fc += ";" + mus.audio_graph(dur, ms, has_music, n, clip.get("normalize", True))
+    cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "[a]",
+            "-c:v", "libx264", "-crf", crf, "-preset", preset, "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-r", str(fps), "-g", str(fps * 2), "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            "-t", f"{dur:.3f}", "-movflags", "+faststart", "out.mp4"]
+    log = (work / "ffmpeg.log").open("w+", encoding="utf-8", errors="replace")
+    import time
+    t0 = time.time()
+    try:
+        proc = subprocess.Popen(cmd, cwd=work, stdin=subprocess.PIPE if track is not None else subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=log, creationflags=NO_WINDOW)
+        try:
+            if track is not None:
+                try:
+                    for frame in track.frames():
+                        proc.stdin.write(frame)
+                        if time.time() - t0 > RENDER_SECONDS:
+                            raise TimeoutError
+                except BrokenPipeError:
+                    pass                                 # ffmpeg stopped early: its own error is read below
+                finally:
+                    try:
+                        proc.stdin.close()
+                    except OSError:
+                        pass
+            proc.wait(timeout=max(5, RENDER_SECONDS - (time.time() - t0)))
+        except (TimeoutError, subprocess.TimeoutExpired):
+            proc.kill()
+            raise RuntimeError("Rendering this clip took too long and was stopped.")
+        log.seek(0)
+        err = log.read()[-1500:]
+    finally:
+        log.close()
+    if proc.returncode != 0 or not (work / "out.mp4").is_file():
+        raise RuntimeError(f"Render failed: {err.strip() or 'ffmpeg stopped with code %s' % proc.returncode}")
+
+
+def audio_preview(src: Path, clip: dict, seconds: float = 20.0) -> bytes:
+    """The clip's sound with its music, as it will be mixed (the first `seconds`), for listening before rendering."""
+    from . import music as mus
+    start = float(clip["start"])
+    dur = min(seconds, float(clip["end"]) - start)
+    ms = clip.get("music_set") or {**mus.BASE, "enabled": False}
+    has_music = bool(clip.get("music_path")) and Path(clip["music_path"]).is_file() and ms.get("enabled")
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", str(Path(src).resolve())]
+    if has_music:
+        cmd += ["-stream_loop", "-1", "-i", str(Path(clip["music_path"]).resolve())]
+    cmd += ["-filter_complex", mus.audio_graph(dur, ms, has_music, 1, clip.get("normalize", True)), "-map", "[a]",
+            "-t", f"{dur:.3f}", "-c:a", "aac", "-b:a", "160k", "-f", "adts", "pipe:1"]
+    out = subprocess.run(cmd, capture_output=True, timeout=120, creationflags=NO_WINDOW)
+    if out.returncode != 0 or not out.stdout:
+        raise RuntimeError("Couldn't make the sound preview: " + out.stderr.decode("utf-8", "replace")[-300:])
+    return out.stdout
+
+
+def frame_preview(src: Path, clip: dict, src_w: int, src_h: int):
+    """One frame of a clip (a second in), laid out the way it will be rendered, without captions: the background
+    for the caption preview. Returns (picture, plan)."""
+    from io import BytesIO
+    from PIL import Image
+    p = layout_plan(clip, src_w, src_h)
+    t = float(clip["start"]) + min(1.0, (float(clip["end"]) - float(clip["start"])) / 2)
+    out = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.2f}", "-i", str(Path(src).resolve()), "-filter_complex",
+                          compose.graph(p, config.OUT_FPS) + ";[v0]format=rgb24[v]", "-map", "[v]", "-frames:v", "1",
+                          "-f", "image2pipe", "-vcodec", "png", "pipe:1"], capture_output=True, timeout=60, creationflags=NO_WINDOW)
+    if out.returncode != 0 or not out.stdout:
+        raise RuntimeError("Could not read a frame of the video.")
+    return Image.open(BytesIO(out.stdout)).convert("RGBA"), p
