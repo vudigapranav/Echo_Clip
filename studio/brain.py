@@ -169,20 +169,31 @@ def ask_ai(prompt, schema=None, purpose="AI call"):
     Returns (the answer, the model that gave it, tokens used) and notes the tokens in the usage record."""
     if not config.ai_ready():
         raise RuntimeError("The AI is not set up on this server.")
+    if not ai.allowed():
+        raise RuntimeError(ai.why_not())
     last = None
-    for model in ai.models():
-        for attempt in range(3):
-            try:
-                out, sent, wrote = ai.call(model, prompt, schema or SCHEMA)
-                usage.record(sent, wrote, purpose)
-                ai.clear_problem()
-                return out, model, sent + wrote
-            except Exception as e:  # noqa: BLE001
-                last = e
-                if "HTTP 429" in str(e) or "HTTP 5" in str(e):
-                    time.sleep(4 * (attempt + 1))
-                    continue
-                break
+    # The main service first. A second (fallback) service only if the owner ticked that it may be used: it may
+    # cost money, so it is never switched to on its own.
+    conns = [None]
+    fb = ai.fallback()
+    if fb and ai.options()["allow_fallback"] and ai._conn_ready(fb):
+        conns.append(fb)
+    for conn in conns:
+        for model in (conn or ai.current())["models"]:
+            for attempt in range(3):
+                try:
+                    out, sent, wrote = ai.call(model, prompt, schema or SCHEMA, conn=conn)
+                    usage.record(sent, wrote, purpose + (f" (fallback: {ai.label(conn['provider'])})" if conn else ""))
+                    ai.clear_problem()
+                    return out, model, sent + wrote
+                except Exception as e:  # noqa: BLE001
+                    last = e
+                    if ("HTTP 429" in str(e) or "HTTP 5" in str(e)) and attempt < 2:
+                        time.sleep(4 * (attempt + 1))     # a busy service: a short wait, at most twice
+                        continue
+                    break
+            if last is not None and ai.classify(last) in ("credits", "invalid_key"):
+                break                                     # every model of this service would fail the same way
     ai.note_problem(last)
     raise RuntimeError(f"The AI did not answer: {ai.explain(last) or last}")
 
