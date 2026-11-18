@@ -8,7 +8,7 @@ that runs on your own Mac.
 - **Qwen.md** is the authoritative development and verification record: what was built, what was checked and
   how, test results, known limitations and what is left. Update it when you change behaviour.
 - **README.md** is for the person using Echo Clip. **AGENTS.md** (this file) is the short map of the code.
-- Echo Clip is built on PeakCut (MIT). Keep LICENSE and THIRD_PARTY_NOTICES.md intact.
+- Echo Clip is built on PeakCut (MIT). PeakCut's copyright notice lives in THIRD_PARTY_NOTICES.md and must stay there.
 
 ## Run and test
 

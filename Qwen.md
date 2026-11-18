@@ -51,7 +51,7 @@ Verified against the code, not the earlier report.
 | `highlights.py` | **C/D** | Not wired into the pipeline; candidate windows not on sentence boundaries; the audio-spike check compared raw negative dB with `> 1.8` (never true); bypassed usage tracking; schema required a field it never defined | Rewritten (§5) |
 | `hook_detector.py` | **C** | Keyword-only, weights not as specified, not wired in | Replaced by `highlights.hook()`; file removed (backed up) |
 | Featherless provider | C | One row in `PROVIDERS` with example model `gpt-4o-mini` (not a Featherless model) and a key URL that does not resolve | Full integration (§4) |
-| Rebranding | C | Main page renamed; server messages, docs and LICENSE handling incomplete; LICENSE **replaced** the original copyright line (MIT requires keeping it); `REPO_URL` default pointed at a made-up `your-username/echo-clip` | Finished; original copyright restored; buttons off by default |
+| Rebranding | C | Main page renamed; server messages, docs and LICENSE handling incomplete; LICENSE **replaced** the original copyright line (MIT requires keeping it); `REPO_URL` default pointed at a made-up `your-username/echo-clip` | Finished; `LICENSE` names the Echo Clip owner, PeakCut's MIT notice kept in `THIRD_PARTY_NOTICES.md` (as MIT requires); buttons off by default |
 | "All 286 tests pass" | B | Re-run: the 14 original suites pass (374 checks counted today) | New suites added (§11) |
 | Qwen.md claims "end-to-end working" | D | No real render had succeeded | Superseded by this record |
 
@@ -217,7 +217,7 @@ candidates), `studio/server.py` (routes: classic, reject, make-from-candidate, d
 source preview, storage projects/cleanup, AI check-model/test, Keychain migration), `studio/brain.py` (ask_ai
 guard/retries/fallback), `studio/captions.py` (fallback fonts), `studio/updates.py` (off unless configured),
 `studio/config.py` (no promo links), user-facing "PeakCut" → "Echo Clip" across `studio/*.py`, `LICENSE`
-(original copyright restored), `AGENTS.md`, `.env.example`, `DEPLOY.md`, `requirements.txt`, `tests/run.py`,
+(the Echo Clip owner's copyright; PeakCut's notice moved to `THIRD_PARTY_NOTICES.md`), `AGENTS.md`, `.env.example`, `DEPLOY.md`, `requirements.txt`, `tests/run.py`,
 `tests/test_updates.py` (names a repository now that there is no default), every `tests/test_*.py` (Keychain off),
 `web/index.html` (§16), `web/classic.html` (promo buttons removed). Deleted: `studio/hook_detector.py`
 (superseded; backed up). Frontend: see §16.
