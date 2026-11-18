@@ -198,10 +198,16 @@ def _decode_remote(pieces: list) -> list:
     return [(p["tokens"], p["timestamps"]) for p in got]
 
 
-def transcribe(audio: np.ndarray, on_progress=None) -> list:
+def transcribe(audio: np.ndarray, on_progress=None, language: str = "") -> list:
     """Returns [{'w': word, 's': start_sec, 'e': end_sec}, ...] for the whole audio.
+    English (or no language given) is written by Parakeet; any other language by Whisper (whisper_asr.py), given
+    as the code Whisper writes it in ("hi" for Hindi and Hinglish). Parakeet only knows English: Hindi comes out of
+    it as made-up English-looking words, so it is never used for it.
     Speech is cut at quiet moments into 12-24 s pieces; silent pieces are skipped."""
     global _remote_down_until
+    if language and language != "en":
+        from . import whisper_asr
+        return whisper_asr.transcribe(audio, language, on_progress)
     words = []
     todo = []
     for a, b in _chunks(audio):
